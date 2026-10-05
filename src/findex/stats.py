@@ -55,6 +55,7 @@ def main() -> None:
     parser.add_argument("--eager", action="store_true", help="версія через списки")
     args = parser.parse_args()
     sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
 
     run = eager_stats if args.eager else lazy_stats
 

@@ -38,6 +38,13 @@ uv run python -m findex.index data/simplewiki.jsonl --out data/index.pkl --limit
 uv run python -m findex.search data/index.pkl "kyiv OR lviv NOT river"
 uv run python -m findex.search data/index.pkl "kyiv ukraine" --engine set
 uv run python scripts/bench_search.py data/index.pkl
+
+uv run python -m findex.index data/simplewiki.jsonl --limit 20000 --positions --out data/index.pkl
+uv run python -m findex.search data/index.pkl 'kyiv AND (ukraine OR dnipro) NOT river' --k 5
+uv run python -m findex.search data/index.pkl '"nuclear power plant"' --scorer tfidf
+uv run python -m findex.search data/index.pkl 'chernobyl' --verbose --repeat
+uv run python scripts/sanity_ranking.py data/index.pkl
+uv run python scripts/eval_queries.py data/index.pkl
 ```
 
 ## Структура
@@ -49,13 +56,21 @@ src/findex/
   stats.py      конвеєр + CLI (python -m findex.stats)
   index.py      побудова інвертованого індексу + CLI
   search.py     Boolean-пошук (merge і set) + CLI
-  store.py      збереження/завантаження індексу (pickle і json)
+  store.py      збереження/завантаження індексу (pickle і json) + open_index
+  merge.py      двовказівникові merge-операції
+  query.py      парсер запитів і дерево вузлів
+  scoring.py    протокол Scorer, TfIdf, BM25, топ-k
+  snippet.py    сніпети з підсвіткою
+  decorators.py @timed
 scripts/
   get_corpus.py parquet -> jsonl
   bench_search.py  порівняння merge і set
+  sanity_ranking.py три перевірки рейтингу
+  eval_queries.py  precision@5 для TF-IDF і BM25
 tests/
   test_tokenize.py
   test_index.py
+  test_ranking.py
 ```
 
 - `iter_documents` працює з файлом `.jsonl`, файлом `.txt` або папкою з ними.
@@ -173,6 +188,9 @@ tests/
 - `store.py` зберігає й завантажує індекс у двох форматах: `pickle` (за розширенням
   `.pkl`) і `json` (за розширенням `.json`).
 
+У лабі 3 словники з цієї лаби перетворилися на клас `Index`, але все описане нижче
+працює так само, просто через об'єкт.
+
 **Про pickle.** `pickle.load()` виконує код, записаний у файлі, тому відкривати
 чужий або завантажений з інтернету `.pkl` небезпечно: це готова діра для виконання
 довільного коду. Я завантажую тільки свої власні файли індексу. Якби індекс треба
@@ -265,3 +283,190 @@ $ uv run python -m findex.search data/index.pkl "kyiv OR lviv NOT river" --top 5
 термів, незмінність і хешованість `Posting`/`DocMeta`, три merge-операції, розбір
 запиту, збіг результатів merge і set, позиції, варіант з `array` та збереження
 і завантаження в обох форматах для всіх трьох представлень.
+
+
+# Лаба 3. Рейтинг і модель об'єктів
+
+## Index як справжній об'єкт Python
+
+`Index` тепер успадковує `collections.abc.Mapping`, тому поводиться як словник термів:
+
+```python
+>>> with open_index("data/index.pkl") as ix:
+...     ix
+...     len(ix)            # кількість термів
+...     "kyiv" in ix       # __contains__
+...     ix["kyiv"][:2]     # __getitem__, KeyError якщо терма немає
+...     ix.num_docs, round(ix.avg_doc_length, 1), ix.df("kyiv")
+Index(terms=221_223, docs=20_000, repr='slots', positions=True)
+221223
+True
+[Posting(doc_id=576, tf=1, positions=(683,)), ...]
+(20000, 394.5, 23)
+```
+
+Від `Mapping` безкоштовно приходять `keys()`, `items()`, `get()` і `__contains__` —
+мені достатньо було написати `__getitem__`, `__len__` та `__iter__`.
+`num_docs` — це `@property`, а `avg_doc_length` — `@cached_property`: BM25 просить
+середню довжину документа для **кожного** документа, тому вважати її щоразу означало б
+проходити по 20 000 значень на кожен бал.
+
+Одна пастка, на яку я натрапив: `Mapping` явно ставить `__hash__ = None`, а мені
+індекс потрібен як ключ для `lru_cache`. Тому в класі є рядок
+`__hash__ = object.__hash__` — хеш за ідентичністю, один об'єкт індексу = один ключ кеша.
+
+`open_index(path)` — context manager на `@contextmanager`: усе до `yield` це `__enter__`,
+усе після — `__exit__`. Пам'ять звільняється і тоді, коли в тілі `with` стався виняток
+(на це є тест `test_open_index_releases_on_error`).
+
+## Scorer: TF-IDF і BM25
+
+`Scorer` — це `typing.Protocol` з одним методом `score(term, posting, index)`.
+`TfIdf` і `BM25(k1=1.5, b=0.75)` нічого не успадковують, вони просто мають потрібний
+метод (у них ще й `__call__ = score`, тому їх можна викликати як функції). Бали
+накопичуються у словнику, а топ-k беруться через `heapq.nlargest` — це O(n log k)
+замість повного сортування O(n log n).
+
+Результат — `@dataclass(order=True, frozen=True, slots=True)` `SearchResult`. Поле
+`score` я поставив **першим** саме для того, щоб `sorted(results)` сортував за балом.
+
+### Три перевірки на моєму корпусі
+
+`uv run python scripts/sanity_ranking.py data/index.pkl`:
+
+**1. Рідкісний терм важить більше за частий.** `df(kyiv)=23`, `df(the)=19298`.
+На запит `kyiv OR the` зверху документи з рідкісним термом:
+
+```
+ 15.211  Kyiv
+ 11.341  Ukraine
+ 10.685  Pripyat
+```
+
+**2. Насичення tf.** Той самий документ (726 токенів), терм `kyiv`, різні tf:
+
+| tf | 1 | 2 | 3 | 5 | 20 | 100 |
+|---|---|---|---|---|---|---|
+| бал BM25 | 4.895 | 7.588 | 9.292 | 11.327 | 15.029 | 16.464 |
+
+Від 1 до 2 входжень бал зростає на 2.7, а від 20 до 100 — лише на 1.4. Це робить `k1`:
+бал прагне до межі `idf * (k1 + 1)`, тому 20-те повторення вже майже нічого не додає.
+
+**3. Довжина документа.** Обидва документи містять `kyiv` рівно один раз:
+
+| Документ | Токенів | Бал BM25 |
+|---|---|---|
+| Antonov An-225 Mriya | 190 | 8.799 |
+| Chicago | 3607 | 1.446 |
+
+Різниця в 6 разів — це робота `b`: коротка стаття з одним входженням справді про Київ,
+а в довгій це випадкова згадка. При `b = 0` нормалізація зникає і ці два бали стали б однаковими.
+
+## Мова запитів
+
+`query.py` — рекурсивний спуск за такою граматикою:
+
+```txt
+or_expr  -> and_expr ('OR' and_expr)*
+and_expr -> not_expr ('AND'? not_expr)*
+not_expr -> 'NOT' atom | atom
+atom     -> term | "phrase" | '(' or_expr ')'
+```
+
+Вузли `Term`, `Phrase`, `And`, `Or`, `Not` — це frozen-датакласи з перевантаженими
+`&`, `|`, `~`, тому дерево можна будувати і руками, без рядка:
+`Term("a") & (Term("b") | Term("c"))`. У кожного вузла є `evaluate(index)`, який
+працює на відсортованих списках через merge-операції з лаби 2.
+
+Тести парсера порівнюють **дерева**, а не рядки, і це саме те, що дає `__eq__` від датакласів:
+
+```python
+parse("a OR b c") == Or(Term("a"), And(Term("b"), Term("c")))
+```
+
+`a OR b c` розбирається як `Or(a, And(b, c))`, бо `OR` стоїть вище в граматиці:
+`or_expr` викликає `and_expr`, тому неявний AND зв'язує сильніше.
+
+Фрази (`"nuclear power plant"`) працюють на позиціях з лаби 2: слово вважається продовженням
+фрази, якщо серед його позицій є `p + 1`. Я звів це до перетину множин зі зсувом,
+тому індекс треба будувати з `--positions`.
+
+Приклад фразового запиту (порядок слів важливий, `"plant power nuclear"` не знайде нічого):
+
+```
+$ uv run python -m findex.search data/index.pkl '"nuclear power plant"' --k 2 --no-snippets
+ 20.112  Nuclear
+ 18.471  Nuclear power
+```
+
+## @timed, кеш і сніпети
+
+`@timed` зроблений на замиканні з `functools.wraps` (без `wraps` у `search.__name__`
+опинилося б `wrapper`) і пише в лог `findex.timing`. На шляху «запит -> id документів»
+стоїть `@lru_cache(maxsize=256)`. Запуск з `--verbose --repeat` показує попадання в кеш:
+
+```
+findex.timing | load -> 12286.91 мс
+findex.search | кеш запитів: CacheInfo(hits=0, misses=1, maxsize=256, currsize=1)
+findex.timing | matching_docs -> 8.36 мс
+findex.timing | ranked_search -> 17.05 мс
+findex.search | кеш запитів: CacheInfo(hits=1, misses=1, maxsize=256, currsize=1)
+findex.timing | matching_docs -> 0.07 мс
+findex.timing | ranked_search -> 3.35 мс
+```
+
+Другий раз той самий запит знайшов документи за 0.07 мс замість 8.36 мс, тобто
+приблизно в 120 разів швидше. `@timed` я поставив **зовні** кеша саме для того,
+щоб попадання теж було видно в логу.
+
+Сніпети — вікно ±80 символів навколо найкращого входження, терми в дужках `[...]`:
+
+```
+$ uv run python -m findex.search data/index.pkl 'kyiv AND (ukraine OR dnipro) NOT river' --k 3
+ 17.471  Pripyat
+          ...pyat Pripyat (Ukrainian: При́п'ять) is an abandoned city in northern [Ukraine]. It lies in [Kyiv] Oblast, near the border with Belarus...
+ 17.171  Antonov An-225 Mriya
+          ...ownership of Antonov was switched to the country of [Ukraine], and all assets were shipped to [Kyiv], or Kiev...
+ 16.580  Chernobyl
+          Chernobyl Chernobyl or Chornobyl () is a city in northern [Ukraine], near the border with Belarus...
+```
+
+Щоб дістати текст документа для сніпета, я додав у `DocMeta` поле `offset` — зміщення
+рядка в jsonl-файлі. Сніпет просто робить `seek(offset)` і читає один рядок,
+а не перечитує весь корпус.
+
+## precision@5: TF-IDF проти BM25
+
+10 запитів, для кожного я вручну склав список статей, які **мають** бути в топ-5
+(`scripts/eval_queries.py`, словник `LABELS`). P@5 — це скільки з 5 виданих документів
+є в моєму списку, поділене на 5.
+
+| Запит | TF-IDF | BM25 |
+|---|---|---|
+| chernobyl disaster | 0.4 | 0.6 |
+| solar system planet | 1.0 | 0.8 |
+| python programming language | 1.0 | 1.0 |
+| ukraine capital city | 0.4 | 0.6 |
+| albert einstein physics | 0.6 | 0.6 |
+| mount everest mountain | 1.0 | 0.6 |
+| united states president | 0.6 | 0.6 |
+| music rock band | 1.0 | 1.0 |
+| computer software | 0.8 | 0.8 |
+| ancient rome empire | 0.8 | 0.8 |
+| **середнє** | **0.76** | **0.74** |
+
+Чесно кажучи, я очікував, що BM25 виграє, а вийшла нічия з мінімальною перевагою
+TF-IDF. Десять запитів — це дуже мало, і одна стаття різниці дає цілих 0.2 на запит,
+тому такий розрив нічого не доводить. Видно й конкретну причину: нормалізація за
+довжиною в BM25 піднімає короткі статті-заготовки. Наприклад, на `mount everest mountain`
+BM25 підняв короткі біографії альпіністів, яких немає в моєму списку, а TF-IDF
+залишив зверху довгі оглядові статті. На запитах, де є рідкісне слово
+(`chernobyl disaster`, `ukraine capital city`), BM25 навпаки кращий. Для надійного
+висновку потрібно значно більше запитів і розмітка не моїми руками.
+
+## Тести
+
+`tests/test_ranking.py` — разом із попередніми лабами 37 тестів: дандери `Index`,
+`cached_property`, звільнення ресурсів у `open_index` при винятку, дерева парсера,
+перевантажені оператори, фрази (і що порядок слів важливий), взаємозамінність
+скорерів, сортування `SearchResult` і підсвітка сніпетів.

@@ -4,11 +4,14 @@ import time
 import tracemalloc
 from array import array
 from collections import Counter, defaultdict
-from dataclasses import dataclass, field
+from collections.abc import Iterator, Mapping
+from dataclasses import dataclass
+from functools import cached_property
 from itertools import islice
 from pathlib import Path
 
 from findex.corpus import iter_documents
+from findex.decorators import timed
 from findex.tokenize import tokenize
 
 REPRS = ("slots", "plain", "array")
@@ -33,15 +36,73 @@ class DocMeta:
     doc_id: int
     path: str
     title: str
+    offset: int = 0
 
 
-@dataclass
-class Index:
-    postings: dict = field(default_factory=dict)
-    doc_lengths: dict[int, int] = field(default_factory=dict)
-    doc_meta: dict[int, DocMeta] = field(default_factory=dict)
-    repr_kind: str = "slots"
-    has_positions: bool = False
+class Index(Mapping):
+    """Term -> postings. Behaves like a read-only dict of terms."""
+
+    def __init__(
+        self,
+        postings: dict | None = None,
+        doc_lengths: dict[int, int] | None = None,
+        doc_meta: dict[int, DocMeta] | None = None,
+        repr_kind: str = "slots",
+        has_positions: bool = False,
+    ) -> None:
+        self.postings = postings if postings is not None else {}
+        self.doc_lengths = doc_lengths if doc_lengths is not None else {}
+        self.doc_meta = doc_meta if doc_meta is not None else {}
+        self.repr_kind = repr_kind
+        self.has_positions = has_positions
+
+    def __len__(self) -> int:
+        return len(self.postings)
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self.postings)
+
+    def __getitem__(self, term: str):
+        return self.postings[term]
+
+    # Mapping sets __hash__ = None, but lru_cache needs a hashable key,
+    # so I take the identity hash back: one index object = one cache key
+    __hash__ = object.__hash__
+
+    def __repr__(self) -> str:
+        return (
+            f"Index(terms={len(self):_}, docs={self.num_docs:_}, "
+            f"repr={self.repr_kind!r}, positions={self.has_positions})"
+        )
+
+    @property
+    def num_docs(self) -> int:
+        return len(self.doc_lengths)
+
+    @cached_property
+    def avg_doc_length(self) -> float:
+        if not self.doc_lengths:
+            return 0.0
+        return sum(self.doc_lengths.values()) / len(self.doc_lengths)
+
+    def doc_length(self, doc_id: int) -> int:
+        return self.doc_lengths.get(doc_id, 0)
+
+    def df(self, term: str) -> int:
+        entry = self.postings.get(term)
+        if entry is None:
+            return 0
+        return len(entry[0]) if self.repr_kind == "array" else len(entry)
+
+    def iter_postings(self, term: str) -> Iterator[Posting]:
+        entry = self.postings.get(term)
+        if entry is None:
+            return
+        if self.repr_kind == "array":
+            for doc_id, tf in zip(entry[0], entry[1], strict=True):
+                yield Posting(doc_id, tf)
+        else:
+            yield from entry
 
     def doc_ids(self, term: str) -> list[int]:
         entry = self.postings.get(term)
@@ -52,12 +113,19 @@ class Index:
         return [p.doc_id for p in entry]
 
     def term_frequencies(self, term: str) -> dict[int, int]:
-        entry = self.postings.get(term)
-        if entry is None:
-            return {}
-        if self.repr_kind == "array":
-            return dict(zip(entry[0], entry[1], strict=True))
-        return {p.doc_id: p.tf for p in entry}
+        return {p.doc_id: p.tf for p in self.iter_postings(term)}
+
+    def positions(self, term: str, doc_id: int) -> tuple[int, ...]:
+        for posting in self.iter_postings(term):
+            if posting.doc_id == doc_id:
+                return posting.positions
+        return ()
+
+    def close(self) -> None:
+        self.postings = {}
+        self.doc_lengths = {}
+        self.doc_meta = {}
+        self.__dict__.pop("avg_doc_length", None)
 
 
 def _title_of(text: str) -> str:
@@ -65,6 +133,7 @@ def _title_of(text: str) -> str:
     return head[:80] if head else "(без назви)"
 
 
+@timed
 def build_index(
     root: Path,
     limit: int | None = None,
@@ -83,7 +152,9 @@ def build_index(
 
     # doc_id grows with the stream, so postings come out sorted by doc_id already
     for doc_id, doc in enumerate(islice(iter_documents(root), limit)):
-        index.doc_meta[doc_id] = DocMeta(doc_id, str(doc.path), _title_of(doc.text))
+        index.doc_meta[doc_id] = DocMeta(
+            doc_id, str(doc.path), _title_of(doc.text), doc.offset
+        )
 
         if positions:
             where: dict[str, list[int]] = defaultdict(list)
@@ -128,6 +199,7 @@ def main() -> None:
     )
     args = parser.parse_args()
     sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
 
     from findex.stats import human
 
@@ -139,8 +211,7 @@ def main() -> None:
     tracemalloc.stop()
 
     print(f"постинги:       {args.repr}" + (" + позиції" if args.positions else ""))
-    print(f"документів:     {len(index.doc_meta):,}")
-    print(f"термів:         {len(index.postings):,}")
+    print(f"{index!r}")
     print(f"час побудови:   {build_time:.2f} с")
     print(f"пікова пам'ять: {human(peak)}")
 

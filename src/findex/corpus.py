@@ -11,11 +11,19 @@ class Document(NamedTuple):
     doc_id: str
     path: Path
     text: str
+    offset: int = 0
 
 
 def _iter_jsonl(path: Path) -> Iterator[Document]:
     with path.open("rb") as f:
-        for lineno, raw in enumerate(f, start=1):
+        lineno = 0
+        while True:
+            # readline instead of "for line in f", so tell() gives the real offset
+            offset = f.tell()
+            raw = f.readline()
+            if not raw:
+                return
+            lineno += 1
             try:
                 record = json.loads(raw.decode("utf-8"))
             except (UnicodeDecodeError, json.JSONDecodeError) as e:
@@ -24,7 +32,7 @@ def _iter_jsonl(path: Path) -> Iterator[Document]:
             doc_id = str(record.get("id", f"{path.name}:{lineno}"))
             title = record.get("title", "")
             text = record.get("text", "")
-            yield Document(doc_id, path, f"{title}\n{text}" if title else text)
+            yield Document(doc_id, path, f"{title}\n{text}" if title else text, offset)
 
 
 def _iter_txt(path: Path) -> Iterator[Document]:

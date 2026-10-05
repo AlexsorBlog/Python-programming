@@ -1,61 +1,27 @@
 import argparse
+import logging
 import sys
-import time
-import tracemalloc
+from functools import lru_cache
 from pathlib import Path
 
+from findex.decorators import timed
 from findex.index import Index
+from findex.merge import merge_and, merge_not, merge_or
+from findex.query import parse
+from findex.scoring import BM25, SearchResult, TfIdf, score_documents, top_k
+from findex.snippet import document_text, make_snippet
 from findex.tokenize import tokenize
 
+__all__ = [
+    "merge_and",
+    "merge_not",
+    "merge_or",
+    "ranked_search",
+    "search",
+]
 
-def merge_and(a: list[int], b: list[int]) -> list[int]:
-    out: list[int] = []
-    i = j = 0
-    while i < len(a) and j < len(b):
-        if a[i] == b[j]:
-            out.append(a[i])
-            i += 1
-            j += 1
-        elif a[i] < b[j]:
-            i += 1
-        else:
-            j += 1
-    return out
-
-
-def merge_or(a: list[int], b: list[int]) -> list[int]:
-    out: list[int] = []
-    i = j = 0
-    while i < len(a) and j < len(b):
-        if a[i] == b[j]:
-            out.append(a[i])
-            i += 1
-            j += 1
-        elif a[i] < b[j]:
-            out.append(a[i])
-            i += 1
-        else:
-            out.append(b[j])
-            j += 1
-    out.extend(a[i:])
-    out.extend(b[j:])
-    return out
-
-
-def merge_not(a: list[int], b: list[int]) -> list[int]:
-    out: list[int] = []
-    i = j = 0
-    while i < len(a) and j < len(b):
-        if a[i] == b[j]:
-            i += 1
-            j += 1
-        elif a[i] < b[j]:
-            out.append(a[i])
-            i += 1
-        else:
-            j += 1
-    out.extend(a[i:])
-    return out
+log = logging.getLogger("findex.search")
+SCORERS = {"bm25": BM25, "tfidf": TfIdf}
 
 
 def _set_op(op: str, a: list[int], b: list[int]) -> list[int]:
@@ -65,7 +31,7 @@ def _set_op(op: str, a: list[int], b: list[int]) -> list[int]:
 
 
 def parse_query(query: str) -> list[tuple[str, str]]:
-    """Query -> list of (operator, term). AND is implicit."""
+    """Flat query -> list of (operator, term). Used by the lab 2 engines."""
     steps: list[tuple[str, str]] = []
     op = "AND"
     for word in query.split():
@@ -103,39 +69,107 @@ def search(index: Index, query: str, engine: str = "merge") -> list[int]:
     return result
 
 
+@lru_cache(maxsize=256)
+def _cached_matches(
+    index: Index, query: str
+) -> tuple[tuple[int, ...], tuple[str, ...]]:
+    node = parse(query)
+    if node is None:
+        return (), ()
+    return tuple(node.evaluate(index)), tuple(dict.fromkeys(node.terms()))
+
+
+@timed
+def matching_docs(index: Index, query: str) -> tuple[tuple[int, ...], tuple[str, ...]]:
+    result = _cached_matches(index, query)
+    log.debug("кеш запитів: %s", _cached_matches.cache_info())
+    return result
+
+
+@timed
+def ranked_search(
+    index: Index,
+    query: str,
+    scorer=None,
+    k: int = 10,
+    snippets: bool = False,
+) -> list[SearchResult]:
+    scorer = scorer if scorer is not None else BM25()
+    doc_ids, terms = matching_docs(index, query)
+    if not doc_ids:
+        return []
+
+    scores = score_documents(index, list(terms), set(doc_ids), scorer)
+    results = top_k(scores, index, k)
+    if not snippets:
+        return results
+
+    with_snippets = []
+    for result in results:
+        meta = index.doc_meta[result.doc_id]
+        text = document_text(meta)
+        with_snippets.append(
+            SearchResult(
+                result.score,
+                result.doc_id,
+                result.title,
+                make_snippet(text, list(terms)),
+            )
+        )
+    return with_snippets
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Пошук у збереженому індексі")
     parser.add_argument("index", type=Path, help="файл індексу")
-    parser.add_argument("query", help="запит, напр. 'kyiv OR lviv NOT river'")
-    parser.add_argument("--engine", choices=("merge", "set"), default="merge")
+    parser.add_argument("query", help="запит, напр. python AND (async OR await)")
+    parser.add_argument("--scorer", choices=tuple(SCORERS), default="bm25")
+    parser.add_argument("--k", type=int, default=10, help="скільки результатів")
+    parser.add_argument("--no-snippets", action="store_true", help="без сніпетів")
     parser.add_argument(
-        "--top", type=int, default=10, help="скільки результатів показати"
+        "--repeat", action="store_true", help="виконати запит двічі, щоб побачити кеш"
     )
+    parser.add_argument(
+        "--boolean", action="store_true", help="старий Boolean-пошук без рейтингу"
+    )
+    parser.add_argument("--engine", choices=("merge", "set"), default="merge")
+    parser.add_argument("--verbose", action="store_true", help="показати лог таймінгів")
     args = parser.parse_args()
     sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
+    logging.basicConfig(
+        level=logging.DEBUG if args.verbose else logging.WARNING,
+        format="%(name)s | %(message)s",
+    )
 
-    from findex.stats import human
-    from findex.store import load
+    from findex.store import open_index
 
-    tracemalloc.start()
-    start = time.perf_counter()
-    index = load(args.index)
-    load_time = time.perf_counter() - start
+    with open_index(args.index) as index:
+        print(f"{index!r}")
 
-    start = time.perf_counter()
-    hits = search(index, args.query, args.engine)
-    search_time = time.perf_counter() - start
-    _, peak = tracemalloc.get_traced_memory()
-    tracemalloc.stop()
+        if args.boolean:
+            hits = search(index, args.query, args.engine)
+            print(f"запит: {args.query}  (engine={args.engine})")
+            print(f"знайдено: {len(hits):,} документів")
+            for doc_id in hits[: args.k]:
+                print(f"  {doc_id:>7}  {index.doc_meta[doc_id].title}")
+            return
 
-    print(f"запит:          {args.query}  (engine={args.engine})")
-    print(f"знайдено:       {len(hits):,} документів")
-    print(f"час завантаження індексу: {load_time:.2f} с")
-    print(f"час пошуку:     {search_time * 1000:.2f} мс")
-    print(f"пікова пам'ять: {human(peak)}")
-    print()
-    for doc_id in hits[: args.top]:
-        print(f"  {doc_id:>7}  {index.doc_meta[doc_id].title}")
+        for run in range(2 if args.repeat else 1):
+            if run:
+                print("\n-- той самий запит ще раз (має влучити в кеш) --")
+            results = ranked_search(
+                index,
+                args.query,
+                SCORERS[args.scorer](),
+                args.k,
+                snippets=not args.no_snippets,
+            )
+            print(f"запит: {args.query}  (scorer={args.scorer})")
+            if not results:
+                print("нічого не знайдено")
+            for result in results:
+                print(result)
 
 
 if __name__ == "__main__":
