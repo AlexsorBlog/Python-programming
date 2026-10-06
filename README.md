@@ -1,5 +1,7 @@
 # findex
 
+[![CI](https://github.com/AlexsorBlog/findex/actions/workflows/ci.yml/badge.svg)](https://github.com/AlexsorBlog/findex/actions/workflows/ci.yml)
+
 Мій проєкт пошукової системи для курсу з Python. Кожна лаба додає нову частину.
 Зараз програма вміє читати корпус потоком і рахувати статистику, не завантажуючи
 весь корпус у пам'ять (Лаба 1), а також будувати інвертований індекс, зберігати
@@ -29,6 +31,16 @@ uv run --group corpus python scripts/get_corpus.py data/simplewiki.parquet data/
 uv sync
 uv run pytest
 uv run ruff check .
+uv run pyright
+
+# встановити як команду (лаба 4)
+uv tool install .
+findex index data/simplewiki.jsonl --out data/index.pkl --limit 20000 --positions
+findex search data/index.pkl 'kyiv AND (ukraine OR dnipro) NOT river' --k 5
+findex stats data/index.pkl
+
+# те саме без встановлення
+uv run findex --help
 
 uv run python -m findex.stats data/simplewiki.jsonl              # весь корпус
 uv run python -m findex.stats data/simplewiki.jsonl --limit 1000 # перші 1000 документів
@@ -47,6 +59,9 @@ uv run python scripts/sanity_ranking.py data/index.pkl
 uv run python scripts/eval_queries.py data/index.pkl
 ```
 
+Команди `python -m findex.index` і `python -m findex.search` із лаб 2–3 у лабі 4
+замінені на `findex index` і `findex search` (див. розділ лаби 4).
+
 ## Структура
 
 ```txt
@@ -62,15 +77,22 @@ src/findex/
   scoring.py    протокол Scorer, TfIdf, BM25, топ-k
   snippet.py    сніпети з підсвіткою
   decorators.py @timed
+  cli.py        CLI на typer (команда findex)
+  __main__.py   python -m findex
 scripts/
   get_corpus.py parquet -> jsonl
   bench_search.py  порівняння merge і set
   sanity_ranking.py три перевірки рейтингу
   eval_queries.py  precision@5 для TF-IDF і BM25
 tests/
+  conftest.py       спільні фікстури
   test_tokenize.py
   test_index.py
   test_ranking.py
+  test_cli.py       CLI через CliRunner
+  test_properties.py властивості Hypothesis
+.github/workflows/
+  ci.yml
 ```
 
 - `iter_documents` працює з файлом `.jsonl`, файлом `.txt` або папкою з ними.
@@ -470,3 +492,200 @@ BM25 підняв короткі біографії альпіністів, як
 `cached_property`, звільнення ресурсів у `open_index` при винятку, дерева парсера,
 перевантажені оператори, фрази (і що порядок слів важливий), взаємозамінність
 скорерів, сортування `SearchResult` і підсвітка сніпетів.
+
+
+# Лаба 4. Типи, тести, пакування і CLI
+
+## Встановлення як інструмента
+
+Тепер це не набір скриптів, а пакет із командою `findex`:
+
+```bash
+uv tool install .            # команда findex з'являється в PATH
+findex --help
+
+uv build                     # dist/findex-0.4.0-py3-none-any.whl
+uvx --from dist/findex-0.4.0-py3-none-any.whl findex --help
+```
+
+Команда береться з `[project.scripts] findex = "findex.cli:app"` у `pyproject.toml`.
+Під час встановлення wheel у `Scripts/` (або `bin/`) з'являється маленький виконуваний
+файл-обгортка, який імпортує `findex.cli` і викликає `app`.
+
+Старі команди замінені:
+
+| Було (лаби 1–3) | Стало |
+|---|---|
+| `python -m findex.stats <корпус>` | `findex stats <корпус>` |
+| `python -m findex.index <корпус> --out ...` | `findex index <корпус> --out ...` |
+| `python -m findex.search <індекс> "запит"` | `findex search <індекс> "запит"` |
+
+`python -m findex` теж працює — це той самий CLI.
+
+## Підкоманди
+
+```bash
+findex index data/simplewiki.jsonl --out data/index.pkl --limit 20000 --positions
+findex search data/index.pkl 'kyiv AND (ukraine OR dnipro) NOT river' --k 3
+findex search data/index.pkl chernobyl --k 3 --json | jq .title
+findex stats data/index.pkl
+findex stats data/simplewiki.jsonl --limit 1000 --eager
+findex -vv search data/index.pkl kyiv          # логи таймінгів і кешу в stderr
+```
+
+`findex index` показує смугу прогресу `rich` (вона йде в stderr, тому не псує
+перенаправлення виводу). `findex search` друкує таблицю:
+
+```
+kyiv AND (ukraine OR dnipro) NOT river  (scorer=bm25)
+┌────────┬──────────────────────┬─────────────────────────────────────────────┐
+│    бал │ заголовок            │ сніпет                                      │
+├────────┼──────────────────────┼─────────────────────────────────────────────┤
+│ 17.471 │ Pripyat              │ ...is an abandoned city in northern Ukraine.│
+│        │                      │ It lies in Kyiv Oblast, near the border...  │
+│ 17.171 │ Antonov An-225 Mriya │ ...switched to the country of Ukraine, and  │
+│        │                      │ all assets were shipped to Kyiv, or Kiev... │
+│ 16.580 │ Chernobyl            │ Chernobyl or Chornobyl () is a city in      │
+│        │                      │ northern Ukraine, near the border with...   │
+└────────┴──────────────────────┴─────────────────────────────────────────────┘
+```
+
+З `--json` у stdout ідуть лише дані, рядок на документ, тому вивід можна передати далі:
+
+```
+{"doc_id": 7287, "score": 12.2632, "title": "Chernobyl"}
+{"doc_id": 7283, "score": 12.1823, "title": "Chernobyl disaster"}
+```
+
+Очікувана помилка — це один рядок у stderr і код виходу 1, без стека викликів:
+
+```
+$ findex search data/nope.pkl kyiv
+помилка: немає файлу індексу: data\nope.pkl
+$ echo $LASTEXITCODE
+1
+```
+
+## Типи: pyright у режимі strict
+
+`[tool.pyright] typeCheckingMode = "strict"`, помилок **нуль**.
+Що для цього довелося зробити:
+
+- `Scorer` — це `typing.Protocol`. `TfIdf` і `BM25` нічого не наслідують, pyright сам
+  перевіряє, що в них є `score(term, posting, index) -> float`.
+- Генератори повертають `Iterator[...]`, а приймають `Iterable[...]`, бо приймати
+  варто якнайширше, а повертати якнайточніше.
+- `Literal` для рядкових параметрів: `type ReprKind = Literal["slots", "plain", "array"]`,
+  `type ScorerName = Literal["bm25", "tfidf"]`, `type Engine = Literal["merge", "set"]`.
+- `type DocId = int` і `type PostingsEntry = list[PostingLike] | ArrayEntry` — аліаси
+  за синтаксисом PEP 695, щоб підписи читалися.
+- `@timed` став generic через PEP 695: `def timed[**P, R](fn: Callable[P, R]) -> Callable[P, R]`.
+  Без цього декоратор «з'їдав» типи всіх обгорнутих функцій.
+- `Posting` і `PlainPosting` — різні класи, тому з'явився протокол `PostingLike`
+  із трьома властивостями. Обидва датакласи задовольняють його без наслідування,
+  і тепер `list[PostingLike]` приймає будь-який із них.
+
+`# type: ignore` і `# pyright: ignore` є лише там, де інакше не виходить, і кожен
+із коментарем:
+
+- `Index.__hash__` — `Mapping` оголошує `__hash__ = None`, а мені потрібен ключ для
+  `lru_cache`, тому я перекриваю його ідентичним хешем.
+- У тестах — там, де я **навмисно** роблю неправильну річ, щоб перевірити, що вона падає
+  (присвоєння в `frozen`-датаклас, новий атрибут при `slots`).
+
+Окрема дрібниця: typer будує опції з `Enum`, а не з `Literal`-аліасів («Type not yet
+supported»). Тому бібліотека лишилася на `Literal`, а в CLI з'явилися два невеликі
+`StrEnum`, і `.value` передається в бібліотеку.
+
+## Тести: 62 штуки, покриття 95%
+
+```bash
+uv run pytest                      # 62 тести
+uv run pytest -m "not slow"        # 61, без довгого
+uv run pytest --cov=findex         # з покриттям
+```
+
+Структура:
+
+- `conftest.py` — спільні фікстури: маленький корпус із трьох статей, зібраний індекс
+  і збережений файл індексу. Раніше кожен файл тестів робив це сам.
+- `test_tokenize.py` — токенізатор через `parametrize`, 14 випадків в одній таблиці,
+  кожен у звіті окремим рядком.
+- `test_index.py` — збірка індексу, merge, збереження/завантаження для всіх трьох
+  представлень у двох форматах (`parametrize` у два поверхи — 6 комбінацій).
+- `test_ranking.py` — дандери `Index`, дерева парсера, три перевірки рейтингу з лаби 3
+  вже як тести, сніпети.
+- `test_cli.py` — CLI через `typer.testing.CliRunner`: `--help`, індексація і пошук
+  поспіль, `--json` (рядки реально парсяться через `json.loads`), коди виходу.
+- `test_properties.py` — властивості Hypothesis.
+- `@pytest.mark.slow` — на тесті, що будує індекс із 4 000 документів.
+
+### Властивості Hypothesis
+
+Замість прикладів, які я придумав, тут описані правила, а приклади генерує Hypothesis:
+
+1. **merge збігається з множинами.** `merge_and(a, b) == sorted(set(a) & set(b))`
+   і те саме для OR та NOT, на будь-яких відсортованих списках.
+2. **Постинги завжди відсортовані** і без повторів, на будь-якому корпусі з довільних рядків.
+3. **save/load — це тотожність.** `load(save(index))` дає ті самі постинги, довжини
+   й метадані, для обох форматів.
+4. **Токенізація ідемпотентна.** `tokenize(" ".join(tokenize(t))) == tokenize(t)`,
+   і жоден токен не буває порожнім.
+
+Hypothesis одразу знайшов те, чого я не писав руками: порожні рядки, текст з одних
+розділових знаків і дивні пробільні символи. Коли щось падає, він **зменшує**
+приклад до найкоротшого — замість сторінки тексту показує один символ.
+
+### Покриття
+
+`TOTAL 785 стейтментів, 95%`. Що лишилося поза покриттям **навмисно**:
+
+| Файл | % | Що не покрито і чому |
+|---|---|---|
+| `__main__.py` | 0% | три рядки запуску `python -m findex`; перевіряється руками |
+| `corpus.py` | 77% | гілка читання `.txt` і реакція на `OSError`; мій корпус — jsonl |
+| `stats.py` | 84% | `eager_stats` на великих даних (це вимірювання, не логіка) |
+| `cli.py` | 97% | кілька гілок виводу, коли результатів нема |
+| решта | 94–100% | — |
+
+Я не ганявся за 100%: дотягнути `__main__.py` означало б писати тест на три рядки
+запуску, а гілку `.txt` я не викидаю, бо вона потрібна для іншого типу корпусу.
+
+## logging замість print
+
+Діагностика в бібліотеці йде через `logging`, у кожному модулі свій
+`log = logging.getLogger(__name__)`. Налаштовується логер **один раз**, у callback
+CLI, і тільки там:
+
+- без прапорців — `WARNING`;
+- `-v` — `INFO` (скільки термів і документів у індексі, куди збережено);
+- `-vv` — `DEBUG` (`@timed` і стан кеша запитів).
+
+Усе це йде в **stderr**, а в stdout лишаються тільки дані. Тому `findex search --json | jq`
+працює навіть із `-vv`. Формат повідомлень — лінивий (`log.info("%d термів", n)`),
+бо тоді рядок склеюється лише якщо цей рівень увімкнений.
+
+## CI
+
+`.github/workflows/ci.yml` на кожен push і PR: `uv sync`, `ruff check`,
+`ruff format --check`, `pyright`, `pytest --cov`, `uv build` і перевірка, що
+`findex --help` працює зі свіжозібраного wheel.
+
+У `pyproject.toml` я вимкнув правила `RUF001`–`RUF003`: вони вважають кириличні
+літери «неоднозначною» латиницею, а в мене всі рядки й докстрінги українські,
+тож це були 28 хибних спрацювань.
+
+## Реліз
+
+```bash
+uv build
+git tag v0.4.0 && git push origin v0.4.0
+```
+
+Далі на GitHub: **Releases → Draft a new release**, вибрати тег `v0.4.0`
+і прикріпити `dist/findex-0.4.0-py3-none-any.whl`. Перевірка з чистого оточення:
+
+```bash
+uv tool install https://github.com/AlexsorBlog/findex/releases/download/v0.4.0/findex-0.4.0-py3-none-any.whl
+findex --help
+```

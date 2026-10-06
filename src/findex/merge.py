@@ -1,5 +1,8 @@
-def merge_and(a: list[int], b: list[int]) -> list[int]:
-    out: list[int] = []
+from findex.index import DocId
+
+
+def merge_and(a: list[DocId], b: list[DocId]) -> list[DocId]:
+    out: list[DocId] = []
     i = j = 0
     while i < len(a) and j < len(b):
         if a[i] == b[j]:
@@ -13,8 +16,8 @@ def merge_and(a: list[int], b: list[int]) -> list[int]:
     return out
 
 
-def merge_or(a: list[int], b: list[int]) -> list[int]:
-    out: list[int] = []
+def merge_or(a: list[DocId], b: list[DocId]) -> list[DocId]:
+    out: list[DocId] = []
     i = j = 0
     while i < len(a) and j < len(b):
         if a[i] == b[j]:
@@ -32,8 +35,8 @@ def merge_or(a: list[int], b: list[int]) -> list[int]:
     return out
 
 
-def merge_not(a: list[int], b: list[int]) -> list[int]:
-    out: list[int] = []
+def merge_not(a: list[DocId], b: list[DocId]) -> list[DocId]:
+    out: list[DocId] = []
     i = j = 0
     while i < len(a) and j < len(b):
         if a[i] == b[j]:

@@ -123,9 +123,9 @@ def main() -> None:
                 totals[name] += row[name]
             print(f"| {query:<30} | {row['tfidf']:.1f} | {row['bm25']:.1f} |")
         n = len(LABELS)
-        print(
-            f"| **середнє** | **{totals['tfidf'] / n:.2f}** | **{totals['bm25'] / n:.2f}** |"
-        )
+        tfidf_avg = totals["tfidf"] / n
+        bm25_avg = totals["bm25"] / n
+        print(f"| **середнє** | **{tfidf_avg:.2f}** | **{bm25_avg:.2f}** |")
 
 
 if __name__ == "__main__":

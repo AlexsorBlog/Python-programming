@@ -1,11 +1,13 @@
 import inspect
 from pathlib import Path
 
+import pytest
+
 from findex.corpus import iter_documents
 from findex.tokenize import tokenize
 
 
-def toks(text):
+def toks(text: str) -> list[str]:
     return list(tokenize(text))
 
 
@@ -14,42 +16,31 @@ def test_is_generator():
     assert inspect.isgeneratorfunction(iter_documents)
 
 
-def test_mixed_case():
-    assert toks("Hello WORLD hElLo") == ["hello", "world", "hello"]
-    assert toks("Straße") == toks("STRASSE") == ["strasse"]
-
-
-def test_cyrillic():
-    assert toks("Київ — столиця України") == ["київ", "столиця", "україни"]
-
-
-def test_combining_accent():
-    assert toks("café") == toks("café") == ["café"]
-
-
-def test_punctuation():
-    assert toks("Hi, there! How... are_you?") == ["hi", "there", "how", "are", "you"]
-
-
-def test_apostrophes():
-    assert toks("don't 'quoted' п’ять пʼять") == ["don't", "quoted", "п'ять", "п'ять"]
-
-
-def test_hyphens():
-    assert toks("e-mail state-of-the-art - trailing-") == [
-        "e-mail",
-        "state-of-the-art",
-        "trailing",
-    ]
-
-
-def test_digits():
-    assert toks("In 1999 pi was 3.14") == ["in", "1999", "pi", "was", "3", "14"]
-
-
-def test_empty():
-    assert toks("") == []
-    assert toks("  ...  ") == []
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("Hello WORLD hElLo", ["hello", "world", "hello"]),
+        ("Straße", ["strasse"]),
+        ("STRASSE", ["strasse"]),
+        ("Київ — столиця України", ["київ", "столиця", "україни"]),
+        ("café", ["café"]),
+        ("café", ["café"]),
+        ("Hi, there! How... are_you?", ["hi", "there", "how", "are", "you"]),
+        ("don't 'quoted'", ["don't", "quoted"]),
+        ("п’ять пʼять", ["п'ять", "п'ять"]),
+        (
+            "e-mail state-of-the-art - trailing-",
+            ["e-mail", "state-of-the-art", "trailing"],
+        ),
+        ("In 1999 pi was 3.14", ["in", "1999", "pi", "was", "3", "14"]),
+        ("", []),
+        ("  ...  ", []),
+        # NFC (not NFKC) keeps fullwidth letters as they are, casefold only lowercases
+        ("ＦＵＬＬ", ["ｆｕｌｌ"]),
+    ],
+)
+def test_tokenize_rules(text: str, expected: list[str]):
+    assert toks(text) == expected
 
 
 def test_bad_lines_skipped(tmp_path: Path):
@@ -58,3 +49,14 @@ def test_bad_lines_skipped(tmp_path: Path):
         b'{"id": 1, "text": "a"}\nnot json\n\xff\xfe\n{"id": 2, "text": "b"}\n'
     )
     assert [d.doc_id for d in iter_documents(f)] == ["1", "2"]
+
+
+def test_offsets_point_at_the_right_line(tmp_path: Path):
+    f = tmp_path / "docs.jsonl"
+    f.write_text(
+        '{"id": 1, "text": "first"}\n{"id": 2, "text": "second"}\n', encoding="utf-8"
+    )
+    docs = list(iter_documents(f))
+    with f.open("rb") as handle:
+        handle.seek(docs[1].offset)
+        assert b"second" in handle.readline()

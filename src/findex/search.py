@@ -1,42 +1,43 @@
-import argparse
 import logging
-import sys
 from functools import lru_cache
-from pathlib import Path
+from typing import Literal
 
 from findex.decorators import timed
-from findex.index import Index
+from findex.index import DocId, Index
 from findex.merge import merge_and, merge_not, merge_or
 from findex.query import parse
-from findex.scoring import BM25, SearchResult, TfIdf, score_documents, top_k
+from findex.scoring import BM25, Scorer, SearchResult, score_documents, top_k
 from findex.snippet import document_text, make_snippet
-from findex.tokenize import tokenize
+
+log = logging.getLogger(__name__)
+
+type ScorerName = Literal["bm25", "tfidf"]
+type Engine = Literal["merge", "set"]
+type BoolOp = Literal["AND", "OR", "NOT"]
 
 __all__ = [
-    "merge_and",
-    "merge_not",
-    "merge_or",
+    "boolean_search",
+    "matching_docs",
     "ranked_search",
-    "search",
 ]
 
-log = logging.getLogger("findex.search")
-SCORERS = {"bm25": BM25, "tfidf": TfIdf}
 
-
-def _set_op(op: str, a: list[int], b: list[int]) -> list[int]:
+def _set_op(op: BoolOp, a: list[DocId], b: list[DocId]) -> list[DocId]:
     sa, sb = set(a), set(b)
     result = {"AND": sa & sb, "OR": sa | sb, "NOT": sa - sb}[op]
     return sorted(result)
 
 
-def parse_query(query: str) -> list[tuple[str, str]]:
+def parse_flat(query: str) -> list[tuple[BoolOp, str]]:
     """Flat query -> list of (operator, term). Used by the lab 2 engines."""
-    steps: list[tuple[str, str]] = []
-    op = "AND"
+    from findex.tokenize import tokenize
+
+    steps: list[tuple[BoolOp, str]] = []
+    op: BoolOp = "AND"
     for word in query.split():
-        if word.upper() in ("AND", "OR", "NOT"):
-            op = word.upper()
+        upper = word.upper()
+        if upper in ("AND", "OR", "NOT"):
+            op = upper  # pyright: ignore[reportAssignmentType]  # upper is one of the three
             continue
         terms = list(tokenize(word))
         if not terms:
@@ -46,8 +47,8 @@ def parse_query(query: str) -> list[tuple[str, str]]:
     return steps
 
 
-def search(index: Index, query: str, engine: str = "merge") -> list[int]:
-    steps = parse_query(query)
+def boolean_search(index: Index, query: str, engine: Engine = "merge") -> list[DocId]:
+    steps = parse_flat(query)
     if not steps:
         return []
 
@@ -72,7 +73,7 @@ def search(index: Index, query: str, engine: str = "merge") -> list[int]:
 @lru_cache(maxsize=256)
 def _cached_matches(
     index: Index, query: str
-) -> tuple[tuple[int, ...], tuple[str, ...]]:
+) -> tuple[tuple[DocId, ...], tuple[str, ...]]:
     node = parse(query)
     if node is None:
         return (), ()
@@ -80,7 +81,9 @@ def _cached_matches(
 
 
 @timed
-def matching_docs(index: Index, query: str) -> tuple[tuple[int, ...], tuple[str, ...]]:
+def matching_docs(
+    index: Index, query: str
+) -> tuple[tuple[DocId, ...], tuple[str, ...]]:
     result = _cached_matches(index, query)
     log.debug("кеш запитів: %s", _cached_matches.cache_info())
     return result
@@ -90,9 +93,10 @@ def matching_docs(index: Index, query: str) -> tuple[tuple[int, ...], tuple[str,
 def ranked_search(
     index: Index,
     query: str,
-    scorer=None,
+    scorer: Scorer | None = None,
     k: int = 10,
     snippets: bool = False,
+    marker: tuple[str, str] = ("[", "]"),
 ) -> list[SearchResult]:
     scorer = scorer if scorer is not None else BM25()
     doc_ids, terms = matching_docs(index, query)
@@ -104,7 +108,7 @@ def ranked_search(
     if not snippets:
         return results
 
-    with_snippets = []
+    with_snippets: list[SearchResult] = []
     for result in results:
         meta = index.doc_meta[result.doc_id]
         text = document_text(meta)
@@ -113,64 +117,11 @@ def ranked_search(
                 result.score,
                 result.doc_id,
                 result.title,
-                make_snippet(text, list(terms)),
+                make_snippet(text, list(terms), marker=marker),
             )
         )
     return with_snippets
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Пошук у збереженому індексі")
-    parser.add_argument("index", type=Path, help="файл індексу")
-    parser.add_argument("query", help="запит, напр. python AND (async OR await)")
-    parser.add_argument("--scorer", choices=tuple(SCORERS), default="bm25")
-    parser.add_argument("--k", type=int, default=10, help="скільки результатів")
-    parser.add_argument("--no-snippets", action="store_true", help="без сніпетів")
-    parser.add_argument(
-        "--repeat", action="store_true", help="виконати запит двічі, щоб побачити кеш"
-    )
-    parser.add_argument(
-        "--boolean", action="store_true", help="старий Boolean-пошук без рейтингу"
-    )
-    parser.add_argument("--engine", choices=("merge", "set"), default="merge")
-    parser.add_argument("--verbose", action="store_true", help="показати лог таймінгів")
-    args = parser.parse_args()
-    sys.stdout.reconfigure(encoding="utf-8")
-    sys.stderr.reconfigure(encoding="utf-8")
-    logging.basicConfig(
-        level=logging.DEBUG if args.verbose else logging.WARNING,
-        format="%(name)s | %(message)s",
-    )
-
-    from findex.store import open_index
-
-    with open_index(args.index) as index:
-        print(f"{index!r}")
-
-        if args.boolean:
-            hits = search(index, args.query, args.engine)
-            print(f"запит: {args.query}  (engine={args.engine})")
-            print(f"знайдено: {len(hits):,} документів")
-            for doc_id in hits[: args.k]:
-                print(f"  {doc_id:>7}  {index.doc_meta[doc_id].title}")
-            return
-
-        for run in range(2 if args.repeat else 1):
-            if run:
-                print("\n-- той самий запит ще раз (має влучити в кеш) --")
-            results = ranked_search(
-                index,
-                args.query,
-                SCORERS[args.scorer](),
-                args.k,
-                snippets=not args.no_snippets,
-            )
-            print(f"запит: {args.query}  (scorer={args.scorer})")
-            if not results:
-                print("нічого не знайдено")
-            for result in results:
-                print(result)
-
-
-if __name__ == "__main__":
-    main()
+# the old name from labs 2-3, kept so older commands and scripts still work
+search = boolean_search

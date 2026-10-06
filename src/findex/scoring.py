@@ -5,16 +5,16 @@ from dataclasses import dataclass
 from operator import attrgetter
 from typing import Protocol
 
-from findex.index import Index, Posting
+from findex.index import DocId, Index, PostingLike
 
 
 class Scorer(Protocol):
-    def score(self, term: str, posting: Posting, index: Index) -> float: ...
+    def score(self, term: str, posting: PostingLike, index: Index) -> float: ...
 
 
 @dataclass(frozen=True, slots=True)
 class TfIdf:
-    def score(self, term: str, posting: Posting, index: Index) -> float:
+    def score(self, term: str, posting: PostingLike, index: Index) -> float:
         df = index.df(term)
         if not df:
             return 0.0
@@ -29,7 +29,7 @@ class BM25:
     k1: float = 1.5
     b: float = 0.75
 
-    def score(self, term: str, posting: Posting, index: Index) -> float:
+    def score(self, term: str, posting: PostingLike, index: Index) -> float:
         df = index.df(term)
         if not df:
             return 0.0
@@ -46,7 +46,7 @@ class BM25:
 class SearchResult:
     # score goes first on purpose: then sorted(results) orders by score
     score: float
-    doc_id: int
+    doc_id: DocId
     title: str = ""
     snippet: str = ""
 
@@ -56,17 +56,17 @@ class SearchResult:
 
 
 def score_documents(
-    index: Index, terms: list[str], candidates: set[int], scorer: Scorer
-) -> dict[int, float]:
-    scores: dict[int, float] = defaultdict(float)
+    index: Index, terms: list[str], candidates: set[DocId], scorer: Scorer
+) -> dict[DocId, float]:
+    scores: defaultdict[DocId, float] = defaultdict(float)
     for term in terms:
         for posting in index.iter_postings(term):
             if posting.doc_id in candidates:
                 scores[posting.doc_id] += scorer.score(term, posting, index)
-    return scores
+    return dict(scores)
 
 
-def top_k(scores: dict[int, float], index: Index, k: int = 10) -> list[SearchResult]:
+def top_k(scores: dict[DocId, float], index: Index, k: int = 10) -> list[SearchResult]:
     results = [
         SearchResult(score, doc_id, index.doc_meta[doc_id].title)
         for doc_id, score in scores.items()

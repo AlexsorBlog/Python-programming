@@ -1,13 +1,28 @@
 [project]
 name = "findex"
-version = "0.1.0"
-description = "Add your description here"
+version = "0.4.0"
+description = "Пошукова система по власному корпусу текстів"
 readme = "README.md"
-authors = [
-    { name = "AlexsorBlog", email = "60074657+AlexsorBlog@users.noreply.github.com" }
-]
 requires-python = ">=3.13"
-dependencies = []
+license = "MIT"
+authors = [
+    { name = "AlexsorBlog", email = "60074657+AlexsorBlog@users.noreply.github.com" },
+]
+keywords = ["search", "inverted-index", "bm25", "information-retrieval"]
+classifiers = [
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Text Processing :: Indexing",
+]
+dependencies = [
+    "rich>=15.0.0",
+    "typer>=0.27.2",
+]
+
+[project.scripts]
+findex = "findex.cli:app"
+
+[project.urls]
+Repository = "https://github.com/AlexsorBlog/findex"
 
 [build-system]
 requires = ["uv_build>=0.12.15,<0.13.0"]
@@ -18,6 +33,33 @@ corpus = [
     "pyarrow>=25.0.1",
 ]
 dev = [
+    "hypothesis>=6.168.5",
+    "pyright>=1.1.414",
     "pytest>=9.1.1",
+    "pytest-cov>=7.1.0",
     "ruff>=0.16.7",
 ]
+
+[tool.pyright]
+include = ["src"]
+typeCheckingMode = "strict"
+pythonVersion = "3.13"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+markers = [
+    "slow: тест довший за секунду",
+]
+
+[tool.coverage.run]
+source = ["findex"]
+
+[tool.coverage.report]
+show_missing = true
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "SIM", "UP", "RUF"]
+# RUF001-003 вважають кирилицю "неоднозначною" латиницею,
+# а в мене українські рядки й докстрінги - це норма
+ignore = ["RUF001", "RUF002", "RUF003"]

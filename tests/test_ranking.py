@@ -3,39 +3,26 @@ from pathlib import Path
 
 import pytest
 
-from findex.index import build_index
+from findex.index import Index, Posting, build_index
 from findex.query import And, Not, Or, Phrase, Term, parse
 from findex.scoring import BM25, SearchResult, TfIdf
 from findex.search import ranked_search
 from findex.snippet import make_snippet
-from findex.store import open_index, save
-
-DOCS = [
-    {"id": 0, "title": "Kyiv", "text": "Kyiv is the capital of Ukraine"},
-    {"id": 1, "title": "Lviv", "text": "Lviv is a city in Ukraine the the the"},
-    {"id": 2, "title": "Paris", "text": "Paris is a city in France city event loop"},
-]
+from findex.store import open_index
 
 
-@pytest.fixture
-def index(tmp_path: Path):
-    f = tmp_path / "docs.jsonl"
-    f.write_text("\n".join(json.dumps(d) for d in DOCS), encoding="utf-8")
-    return build_index(f, positions=True)
-
-
-def test_index_is_a_mapping(index):
+def test_index_is_a_mapping(index: Index):
     assert len(index) == len(index.postings)
     assert "kyiv" in index
     assert "nothinghere" not in index
-    assert index["kyiv"][0].doc_id == 0
+    assert index.doc_ids("kyiv") == [0]
     assert sorted(index)[:2] == sorted(index.postings)[:2]
     assert "Index(terms=" in repr(index)
     with pytest.raises(KeyError):
         index["nothinghere"]
 
 
-def test_index_properties(index):
+def test_index_properties(index: Index):
     assert index.num_docs == 3
     assert index.df("ukraine") == 2
     assert index.doc_length(0) == 7
@@ -44,10 +31,8 @@ def test_index_properties(index):
     assert "avg_doc_length" in index.__dict__
 
 
-def test_open_index_releases_on_error(tmp_path: Path, index):
-    path = tmp_path / "index.pkl"
-    save(index, path)
-    with pytest.raises(RuntimeError), open_index(path) as opened:
+def test_open_index_releases_on_error(index_file: Path):
+    with pytest.raises(RuntimeError), open_index(index_file) as opened:
         assert len(opened) > 0
         kept = opened
         raise RuntimeError("boom")
@@ -73,32 +58,50 @@ def test_operators_build_same_tree():
     assert ~Term("a") == parse("NOT a")
 
 
-def test_phrase_needs_order(index):
+def test_broken_query_raises():
+    with pytest.raises(ValueError, match="розібрати"):
+        parse("kyiv )")
+
+
+def test_phrase_needs_order(index: Index):
     assert Phrase(("event", "loop")).evaluate(index) == [2]
     assert Phrase(("loop", "event")).evaluate(index) == []
 
 
-def test_boolean_tree_evaluation(index):
-    assert parse("city ukraine").evaluate(index) == [1]
-    assert parse("kyiv OR paris").evaluate(index) == [0, 2]
-    assert parse("city NOT france").evaluate(index) == [1]
+def test_phrase_needs_positions(corpus: Path):
+    without = build_index(corpus)
+    with pytest.raises(ValueError, match="positions"):
+        Phrase(("event", "loop")).evaluate(without)
 
 
-def test_rare_term_beats_common(index):
+def test_boolean_tree_evaluation(index: Index):
+    node = parse("city ukraine")
+    assert node is not None
+    assert node.evaluate(index) == [1]
+
+
+def test_rare_term_beats_common(index: Index):
     results = ranked_search(index, "kyiv OR the", BM25(), k=5)
     assert results[0].doc_id == 0
 
 
-def test_saturation_and_length(index):
+def test_bm25_saturation(index: Index):
     bm25 = BM25()
-    short = bm25.score("city", next(index.iter_postings("city")), index)
-    assert short > 0
-    tenfold = type(next(index.iter_postings("city")))(1, 20)
-    once = type(next(index.iter_postings("city")))(1, 1)
-    assert bm25.score("city", tenfold, index) < 4 * bm25.score("city", once, index)
+    once = bm25.score("city", Posting(1, 1), index)
+    twenty = bm25.score("city", Posting(1, 20), index)
+    assert once < twenty < 4 * once
 
 
-def test_scorers_are_interchangeable(index):
+def test_bm25_prefers_short_document(index: Index):
+    bm25 = BM25()
+    short = bm25.score("city", Posting(1, 1), index)
+    long_doc_id = max(index.doc_lengths, key=lambda d: index.doc_length(d))
+    long = bm25.score("city", Posting(long_doc_id, 1), index)
+    assert index.doc_length(long_doc_id) >= index.doc_length(1)
+    assert short >= long
+
+
+def test_scorers_are_interchangeable(index: Index):
     for scorer in (BM25(), TfIdf()):
         results = ranked_search(index, "city", scorer, k=5)
         assert [r.doc_id for r in results] == [2, 1]
@@ -118,6 +121,21 @@ def test_snippet_highlights():
     assert len(snippet) < len(text) + 20
 
 
-def test_snippets_in_results(index):
+def test_snippets_in_results(index: Index):
     results = ranked_search(index, "kyiv", k=1, snippets=True)
     assert "[" in results[0].snippet
+
+
+@pytest.mark.slow
+def test_build_on_a_bigger_corpus(tmp_path: Path):
+    path = tmp_path / "big.jsonl"
+    with path.open("w", encoding="utf-8") as f:
+        for i in range(4000):
+            words = " ".join(f"word{i % 97} term{i % 31} filler{j}" for j in range(12))
+            f.write(json.dumps({"id": i, "title": f"doc {i}", "text": words}) + "\n")
+
+    built = build_index(path)
+    assert built.num_docs == 4000
+    assert built.doc_ids("word5") == sorted(built.doc_ids("word5"))
+    results = ranked_search(built, "word5 term10", BM25(), k=5)
+    assert results

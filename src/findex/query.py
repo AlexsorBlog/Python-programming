@@ -1,6 +1,6 @@
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
-from findex.index import Index
+from findex.index import DocId, Index
 from findex.merge import merge_and, merge_not, merge_or
 from findex.tokenize import tokenize
 
@@ -18,7 +18,7 @@ class Node:
     def terms(self) -> list[str]:
         raise NotImplementedError
 
-    def evaluate(self, index: Index) -> list[int]:
+    def evaluate(self, index: Index) -> list[DocId]:
         raise NotImplementedError
 
 
@@ -29,18 +29,18 @@ class Term(Node):
     def terms(self) -> list[str]:
         return [self.term]
 
-    def evaluate(self, index: Index) -> list[int]:
+    def evaluate(self, index: Index) -> list[DocId]:
         return index.doc_ids(self.term)
 
 
 @dataclass(frozen=True)
 class Phrase(Node):
-    words: tuple[str, ...] = field(default_factory=tuple)
+    words: tuple[str, ...] = ()
 
     def terms(self) -> list[str]:
         return list(self.words)
 
-    def evaluate(self, index: Index) -> list[int]:
+    def evaluate(self, index: Index) -> list[DocId]:
         if not self.words:
             return []
         if not index.has_positions:
@@ -50,12 +50,11 @@ class Phrase(Node):
         for word in self.words[1:]:
             candidates = merge_and(candidates, index.doc_ids(word))
 
-        hits = []
+        hits: list[DocId] = []
         for doc_id in candidates:
             starts = set(index.positions(self.words[0], doc_id))
             for shift, word in enumerate(self.words[1:], start=1):
-                nexts = {p - shift for p in index.positions(word, doc_id)}
-                starts &= nexts
+                starts &= {p - shift for p in index.positions(word, doc_id)}
                 if not starts:
                     break
             if starts:
@@ -71,7 +70,7 @@ class And(Node):
     def terms(self) -> list[str]:
         return self.left.terms() + self.right.terms()
 
-    def evaluate(self, index: Index) -> list[int]:
+    def evaluate(self, index: Index) -> list[DocId]:
         return merge_and(self.left.evaluate(index), self.right.evaluate(index))
 
 
@@ -83,7 +82,7 @@ class Or(Node):
     def terms(self) -> list[str]:
         return self.left.terms() + self.right.terms()
 
-    def evaluate(self, index: Index) -> list[int]:
+    def evaluate(self, index: Index) -> list[DocId]:
         return merge_or(self.left.evaluate(index), self.right.evaluate(index))
 
 
@@ -94,7 +93,7 @@ class Not(Node):
     def terms(self) -> list[str]:
         return []
 
-    def evaluate(self, index: Index) -> list[int]:
+    def evaluate(self, index: Index) -> list[DocId]:
         return merge_not(sorted(index.doc_meta), self.child.evaluate(index))
 
 
