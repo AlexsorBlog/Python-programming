@@ -2,6 +2,7 @@ import enum
 import io
 import json
 import logging
+import os
 import sys
 import time
 import tracemalloc
@@ -14,7 +15,7 @@ from rich.markup import escape
 from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn
 from rich.table import Table
 
-from findex.index import build_index
+from findex.parallel import build_parallel
 from findex.scoring import BM25, TfIdf
 from findex.search import ranked_search
 from findex.stats import eager_stats, human, lazy_stats
@@ -32,6 +33,12 @@ class ReprChoice(enum.StrEnum):
 class ScorerChoice(enum.StrEnum):
     bm25 = "bm25"
     tfidf = "tfidf"
+
+
+class ExecutorChoice(enum.StrEnum):
+    serial = "serial"
+    threads = "threads"
+    processes = "processes"
 
 
 # Windows consoles default to cp1252 and crash on Ukrainian output.
@@ -86,6 +93,12 @@ def index(
     repr_kind: Annotated[
         ReprChoice, typer.Option("--repr", help="спосіб зберігання постингів")
     ] = ReprChoice.slots,
+    workers: Annotated[
+        int, typer.Option("--workers", help="скільки воркерів (0 = os.cpu_count())")
+    ] = 1,
+    executor: Annotated[
+        ExecutorChoice, typer.Option("--executor", help="як розпаралелити збірку")
+    ] = ExecutorChoice.serial,
 ) -> None:
     """Побудувати індекс і зберегти його у файл."""
     if not corpus.exists():
@@ -93,29 +106,29 @@ def index(
     if repr_kind is ReprChoice.array and positions:
         raise _fail("позиції не підтримуються для --repr array")
 
+    jobs = workers if workers > 0 else (os.cpu_count() or 1)
+
     with Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
         BarColumn(),
-        TextColumn("{task.completed:,} документів"),
         console=err,
     ) as progress:
-        task = progress.add_task("індексую", total=limit)
-        tracemalloc.start()
-        start = time.perf_counter()
-        built = build_index(
+        progress.add_task(f"індексую ({executor.value}, {jobs} воркер(ів))", total=None)
+        built, timings = build_parallel(
             corpus,
+            jobs,
+            executor.value,
             limit,
             positions,
             repr_kind.value,
-            on_progress=lambda done: progress.update(task, completed=done),
         )
-        elapsed = time.perf_counter() - start
-        _, peak = tracemalloc.get_traced_memory()
-        tracemalloc.stop()
 
     out.print(f"{built!r}")
-    out.print(f"час побудови: {elapsed:.2f} с, пікова пам'ять: {human(peak)}")
+    out.print(
+        f"час побудови: {timings.wall:.2f} с (merge {timings.merge:.2f} с), "
+        f"CPU {timings.cpu:.2f} с, шматків: {timings.chunks}"
+    )
 
     start = time.perf_counter()
     save(built, out_path)

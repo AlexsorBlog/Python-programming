@@ -148,7 +148,7 @@ class Index(Mapping[str, PostingsEntry]):
         self.__dict__.pop("avg_doc_length", None)
 
 
-def _title_of(text: str) -> str:
+def title_of(text: str) -> str:
     head = text.lstrip().split("\n", 1)[0]
     return head[:80] if head else "(без назви)"
 
@@ -173,7 +173,7 @@ def build_index(
     # doc_id grows with the stream, so postings come out sorted by doc_id already
     for doc_id, doc in enumerate(islice(iter_documents(root), limit)):
         doc_meta[doc_id] = DocMeta(
-            doc_id, str(doc.path), _title_of(doc.text), doc.offset
+            doc_id, str(doc.path), title_of(doc.text), doc.offset
         )
 
         if positions:

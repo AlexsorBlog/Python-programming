@@ -1,0 +1,41 @@
+{
+  "gil": false,
+  "cpus": 16,
+  "results": [
+    {
+      "executor": "threads (3.13t)",
+      "workers": 1,
+      "wall": 10.013789800000268,
+      "cpu": 9.53125,
+      "merge": 0.07533080000030168
+    },
+    {
+      "executor": "threads (3.13t)",
+      "workers": 2,
+      "wall": 7.196135299999696,
+      "cpu": 10.46875,
+      "merge": 0.16541569999935746
+    },
+    {
+      "executor": "threads (3.13t)",
+      "workers": 4,
+      "wall": 5.429541900000004,
+      "cpu": 11.09375,
+      "merge": 0.23934970000027533
+    },
+    {
+      "executor": "threads (3.13t)",
+      "workers": 8,
+      "wall": 4.450992000000042,
+      "cpu": 15.03125,
+      "merge": 0.33458020000034594
+    },
+    {
+      "executor": "threads (3.13t)",
+      "workers": 16,
+      "wall": 9.464750699999968,
+      "cpu": 37.46875,
+      "merge": 0.4385768000001917
+    }
+  ]
+}

@@ -47,9 +47,16 @@ def _iter_txt(path: Path) -> Iterator[Document]:
     yield Document(str(path), path, text)
 
 
-def iter_documents(root: Path) -> Iterator[Document]:
+def corpus_paths(root: Path) -> list[Path]:
+    """Sorted on purpose: doc_id must not depend on filesystem order."""
     root = Path(root)
-    paths = [root] if root.is_file() else root.rglob("*")
+    if root.is_file():
+        return [root]
+    return sorted(p for p in root.rglob("*") if p.suffix in (".jsonl", ".txt"))
+
+
+def iter_documents(root: Path) -> Iterator[Document]:
+    paths = corpus_paths(root)
     for path in paths:
         if path.suffix == ".jsonl":
             yield from _iter_jsonl(path)
