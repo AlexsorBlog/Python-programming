@@ -14,7 +14,9 @@ classifiers = [
     "Topic :: Text Processing :: Indexing",
 ]
 dependencies = [
+    "httpx>=0.28.1",
     "rich>=15.0.0",
+    "selectolax>=1.0.0",
     "typer>=0.27.2",
 ]
 
@@ -40,6 +42,7 @@ dev = [
     "hypothesis>=6.168.5",
     "pyright>=1.1.414",
     "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
     "pytest-cov>=7.1.0",
     "ruff>=0.16.7",
 ]
@@ -52,6 +55,7 @@ pythonVersion = "3.13"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+asyncio_mode = "auto"
 markers = [
     "slow: тест довший за секунду",
 ]

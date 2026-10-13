@@ -1,0 +1,32 @@
+{
+  "seed": "https://books.toscrape.com/",
+  "results": [
+    {
+      "concurrency": 1,
+      "pages": 200,
+      "wall": 29.116148499999326,
+      "pps": 6.869040388360591,
+      "errors": 0,
+      "rss": 45.25,
+      "speedup": 1.0
+    },
+    {
+      "concurrency": 5,
+      "pages": 200,
+      "wall": 13.719866600000387,
+      "pps": 14.577401211757726,
+      "errors": 0,
+      "rss": 48.16015625,
+      "speedup": 2.1221888921280403
+    },
+    {
+      "concurrency": 20,
+      "pages": 200,
+      "wall": 13.241903500000262,
+      "pps": 15.103568758071379,
+      "errors": 0,
+      "rss": 49.03515625,
+      "speedup": 2.198788754199783
+    }
+  ]
+}

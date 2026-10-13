@@ -1,3 +1,4 @@
+import asyncio
 import enum
 import io
 import json
@@ -15,6 +16,7 @@ from rich.markup import escape
 from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn
 from rich.table import Table
 
+from findex.crawler import CrawlStats
 from findex.parallel import build_parallel
 from findex.scoring import BM25, TfIdf
 from findex.search import ranked_search
@@ -251,3 +253,116 @@ def stats(
 
 
 __all__ = ["ReprChoice", "ScorerChoice", "app"]
+
+
+@app.command()
+def crawl(
+    seed: Annotated[str, typer.Argument(help="початковий URL")],
+    out_path: Annotated[
+        Path, typer.Option("--out", help="куди писати сторінки (jsonl)")
+    ] = Path("data/crawl.jsonl"),
+    max_pages: Annotated[int, typer.Option(help="стеля на число сторінок")] = 200,
+    concurrency: Annotated[int, typer.Option(help="одночасних запитів усього")] = 10,
+    per_host: Annotated[int, typer.Option(help="одночасних запитів на хост")] = 2,
+    host_delay: Annotated[
+        float, typer.Option(help="мінімальна пауза між запитами до хоста, с")
+    ] = 0.2,
+    log_path: Annotated[
+        Path, typer.Option("--log", help="лог статусів по кожному URL")
+    ] = Path("crawl.log"),
+    debug_loop: Annotated[
+        bool, typer.Option("--debug-loop", help="asyncio у режимі debug")
+    ] = False,
+) -> None:
+    """Обійти сайт і зберегти сторінки у jsonl (індексація - окремою командою)."""
+    if not seed.startswith(("http://", "https://")):
+        raise _fail("URL має починатися з http:// або https://")
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    url_logger = logging.getLogger("findex.crawl.urls")
+    url_logger.setLevel(logging.INFO)
+    url_logger.propagate = False
+    handler = logging.FileHandler(log_path, mode="w", encoding="utf-8")
+    handler.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
+    url_logger.addHandler(handler)
+
+    stats = CrawlStats()
+    started = time.perf_counter()
+
+    try:
+        asyncio.run(
+            _crawl_to_file(
+                seed, out_path, max_pages, concurrency, per_host, host_delay, stats
+            ),
+            debug=debug_loop,
+        )
+    except KeyboardInterrupt:
+        err.print("[yellow]перервано[/yellow]")
+    finally:
+        handler.close()
+        url_logger.removeHandler(handler)
+
+    elapsed = time.perf_counter() - started
+    table = Table(show_header=False)
+    table.add_column(style="dim")
+    table.add_column(justify="right")
+    table.add_row("сторінок", f"{stats.fetched:,}")
+    table.add_row("час", f"{elapsed:.1f} с")
+    table.add_row("сторінок/с", f"{stats.fetched / elapsed if elapsed else 0:.2f}")
+    table.add_row("помилок", str(stats.errors))
+    table.add_row("пропущено", str(stats.skipped))
+    table.add_row("файл", str(out_path))
+    table.add_row("лог", str(log_path))
+    out.print(table)
+
+
+async def _crawl_to_file(
+    seed: str,
+    out_path: Path,
+    max_pages: int,
+    concurrency: int,
+    per_host: int,
+    host_delay: float,
+    stats: CrawlStats,
+) -> None:
+    from rich.live import Live
+
+    from findex.crawler import crawl as crawl_pages
+
+    def render() -> Table:
+        table = Table(show_header=False, box=None)
+        table.add_column(style="dim")
+        table.add_column(justify="right")
+        table.add_row("зібрано", f"{stats.fetched}/{max_pages}")
+        table.add_row("сторінок/с", f"{stats.pages_per_second:.2f}")
+        table.add_row("в польоті", str(stats.in_flight))
+        table.add_row("у черзі", str(stats.queued))
+        table.add_row("помилок", str(stats.errors))
+        return table
+
+    # pages are written as they arrive: the whole crawl never sits in memory
+    with (
+        out_path.open("w", encoding="utf-8") as f,
+        Live(render(), console=err, refresh_per_second=4) as live,
+    ):
+        async for page in crawl_pages(
+            [seed],
+            max_pages=max_pages,
+            concurrency=concurrency,
+            per_host=per_host,
+            host_delay=host_delay,
+            stats=stats,
+        ):
+            f.write(
+                json.dumps(
+                    {
+                        "id": page.url,
+                        "title": page.title,
+                        "text": page.text,
+                        "fetched_at": page.fetched_at,
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
+            live.update(render())
