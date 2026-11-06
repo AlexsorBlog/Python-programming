@@ -37,6 +37,7 @@ class Chunk:
     first_doc_id: int
     positions: bool = False
     repr_kind: ReprKind = "slots"
+    max_docs: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,8 +93,17 @@ def plan_chunks(
     next_id = 0
     for i in range(0, len(paths), per_group):
         group = paths[i : i + per_group]
-        chunks.append(Chunk(tuple(group), next_id, positions, repr_kind))
-        next_id += sum(sizes[i : i + per_group])
+        taken = sum(sizes[i : i + per_group])
+        chunks.append(
+            Chunk(
+                tuple(group),
+                next_id,
+                positions,
+                repr_kind,
+                taken if limit is not None else None,
+            )
+        )
+        next_id += taken
     return chunks
 
 
@@ -110,8 +120,11 @@ def build_partial(chunk: Chunk) -> Partial:
     doc_meta: dict[DocId, DocMeta] = {}
 
     doc_id = chunk.first_doc_id
+    budget = chunk.max_docs
     for path in chunk.paths:
         for doc in iter_documents(path):
+            if budget is not None and doc_id - chunk.first_doc_id >= budget:
+                break
             doc_meta[doc_id] = DocMeta(
                 doc_id, str(doc.path), title_of(doc.text), doc.offset
             )
