@@ -1,6 +1,6 @@
 [project]
 name = "findex"
-version = "0.7.0"
+version = "1.0.0"
 description = "Пошукова система по власному корпусу текстів"
 readme = "README.md"
 requires-python = ">=3.13"
@@ -17,6 +17,7 @@ dependencies = [
     "fastapi>=0.163.1",
     "httpx>=0.28.1",
     "jinja2>=3.1.6",
+    "numpy>=2.5.3",
     "pydantic-settings>=2.16.3",
     "rich>=15.0.0",
     "selectolax>=1.0.0",
@@ -44,11 +45,19 @@ corpus = [
 ]
 dev = [
     "hypothesis>=6.168.5",
+    "py-spy>=0.4.3",
     "pyright>=1.1.414",
     "pytest>=9.1.1",
     "pytest-asyncio>=1.4.0",
+    "pytest-benchmark>=5.3.1",
     "pytest-cov>=7.1.0",
     "ruff>=0.16.7",
+]
+profile = [
+    "scalene>=2.4.0",
+]
+semantic = [
+    "fastembed>=0.9.1",
 ]
 
 [tool.pyright]

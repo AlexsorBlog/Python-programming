@@ -34,6 +34,17 @@ class PostingLike(Protocol):
     def positions(self) -> tuple[int, ...]: ...
 
 
+class SearchIndex(Protocol):
+    """What the query parser needs; Index and NumpyIndex both fit."""
+
+    @property
+    def has_positions(self) -> bool: ...
+    @property
+    def doc_meta(self) -> Mapping["DocId", "DocMeta"]: ...
+    def doc_ids(self, term: str) -> list["DocId"]: ...
+    def positions(self, term: str, doc_id: "DocId") -> tuple[int, ...]: ...
+
+
 @dataclass(frozen=True, slots=True)
 class Posting:
     doc_id: DocId

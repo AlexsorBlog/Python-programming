@@ -16,19 +16,25 @@ from fastapi.templating import Jinja2Templates
 from markupsafe import Markup, escape
 
 from findex.index import Index
+from findex.numpy_index import NumpyIndex
 from findex.scoring import BM25, Scorer, SearchResult, TfIdf
-from findex.search import matching_docs, ranked_search
+from findex.search import matching_docs, ranked_search, ranked_search_numpy
 from findex.snippet import document_text, make_snippet
-from findex.store import load
+from findex.store import load_any
+from findex.tokenize import tokenize
 from findex.web.models import (
     DocResponse,
     HealthResponse,
     Hit,
+    Mode,
     ScorerName,
     SearchResponse,
     StatsResponse,
 )
 from findex.web.settings import Settings
+
+# lab 8: the service runs on either the lab 3 object index or the NumPy one
+type AnyIndex = Index | NumpyIndex
 
 log = logging.getLogger("findex.web")
 HERE = Path(__file__).parent
@@ -43,15 +49,15 @@ def get_settings() -> Settings:
     return Settings()
 
 
-def get_index_optional(request: Request) -> Index | None:
+def get_index_optional(request: Request) -> AnyIndex | None:
     """The one place routes get the index from; tests override this."""
-    index: Index | None = getattr(request.app.state, "index", None)
+    index: AnyIndex | None = getattr(request.app.state, "index", None)
     return index
 
 
 def get_index(
-    index: Annotated[Index | None, Depends(get_index_optional)],
-) -> Index:
+    index: Annotated[AnyIndex | None, Depends(get_index_optional)],
+) -> AnyIndex:
     if index is None:
         raise HTTPException(status_code=503, detail="індекс ще не завантажено")
     return index
@@ -62,18 +68,36 @@ def _scorer(name: ScorerName) -> Scorer:
 
 
 def run_search(
-    index: Index, q: str, k: int, page: int, scorer: ScorerName
+    index: AnyIndex,
+    q: str,
+    k: int,
+    page: int,
+    scorer: ScorerName,
+    mode: Mode = Mode.lexical,
+    embeddings: Path | None = None,
 ) -> tuple[list[SearchResult], int, list[str]]:
     """One page of results plus the total number of matches."""
+    if mode is not Mode.lexical:
+        if embeddings is None:
+            raise ValueError("семантичний режим вимкнений: немає EMBEDDINGS_PATH")
+        from findex.hybrid import FUSION_DEPTH, semantic_results
+
+        ranked = semantic_results(index, embeddings, q, mode.value, FUSION_DEPTH)
+        terms = [t for t in dict.fromkeys(tokenize(q)) if len(t) > 2]
+        return ranked[(page - 1) * k : page * k], len(ranked), terms
+
     doc_ids, terms = matching_docs(index, q)
     total = len(doc_ids)
     if not total:
         return [], 0, []
-    ranked = ranked_search(index, q, _scorer(scorer), k=k * page)
+    if isinstance(index, NumpyIndex):
+        ranked = ranked_search_numpy(index, q, scorer.value, k=k * page)
+    else:
+        ranked = ranked_search(index, q, _scorer(scorer), k=k * page)
     return ranked[(page - 1) * k : page * k], total, list(terms)
 
 
-def snippet_for(index: Index, doc_id: int, terms: list[str]) -> str:
+def snippet_for(index: AnyIndex, doc_id: int, terms: list[str]) -> str:
     text = document_text(index.doc_meta[doc_id])
     return make_snippet(text, terms, marker=(_OPEN, _CLOSE))
 
@@ -85,12 +109,18 @@ def highlight(snippet: str) -> Markup:
 
 
 def search_response(
-    index: Index, q: str, k: int, page: int, scorer: ScorerName
+    index: AnyIndex,
+    q: str,
+    k: int,
+    page: int,
+    scorer: ScorerName,
+    mode: Mode = Mode.lexical,
+    embeddings: Path | None = None,
 ) -> SearchResponse:
     """The whole /search job, shared by the route and the def/async benchmark."""
     start = time.perf_counter()
     try:
-        results, total, terms = run_search(index, q, k, page, scorer)
+        results, total, terms = run_search(index, q, k, page, scorer, mode, embeddings)
     except ValueError as e:
         # a broken query or a phrase without positions is the user's input
         raise HTTPException(status_code=422, detail=str(e)) from None
@@ -108,6 +138,7 @@ def search_response(
     return SearchResponse(
         query=q,
         scorer=scorer,
+        mode=mode,
         page=page,
         k=k,
         total=total,
@@ -126,7 +157,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     started = time.perf_counter()
     try:
         # loading is plain CPU + disk work, so it goes to a thread
-        app.state.index = await asyncio.to_thread(load, settings.index_path)
+        app.state.index = await asyncio.to_thread(load_any, settings.index_path)
         log.info(
             "індекс %s завантажено за %.2f с: %r",
             settings.index_path,
@@ -135,6 +166,14 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
         )
     except FileNotFoundError:
         log.error("немає файлу індексу %s, /health віддає 503", settings.index_path)
+    if settings.embeddings_path is not None and app.state.index is not None:
+        # load the model now, not on the first semantic query of a visitor
+        from findex.hybrid import load_semantic
+        from findex.semantic import embedder
+
+        await asyncio.to_thread(load_semantic, str(settings.embeddings_path))
+        await asyncio.to_thread(embedder)
+        log.info("семантичний режим увімкнено: %s", settings.embeddings_path)
     yield
     if app.state.index is not None:
         app.state.index.close()
@@ -144,7 +183,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
 def create_app() -> FastAPI:
     app = FastAPI(
         title="findex",
-        version="0.7.0",
+        version="1.0.0",
         lifespan=lifespan,
         docs_url="/api/docs",
         redoc_url=None,
@@ -184,7 +223,7 @@ def create_app() -> FastAPI:
     # event loop and doesn't queue behind searches in the thread pool
     @app.get("/health", response_model=HealthResponse)
     async def health(
-        index: Annotated[Index | None, Depends(get_index_optional)],
+        index: Annotated[AnyIndex | None, Depends(get_index_optional)],
     ) -> JSONResponse:
         if index is None:
             return JSONResponse({"status": "starting", "documents": 0}, status_code=503)
@@ -194,18 +233,27 @@ def create_app() -> FastAPI:
     # and FastAPI runs a def route in its thread pool instead of the event loop
     @app.get("/search", response_model=SearchResponse)
     def search(
-        index: Annotated[Index, Depends(get_index)],
+        index: Annotated[AnyIndex, Depends(get_index)],
         settings: Annotated[Settings, Depends(get_settings)],
         q: Annotated[str, Query(min_length=1, max_length=200)],
         k: Annotated[int, Query(ge=1, le=50)] = 10,
         page: Annotated[int, Query(ge=1, le=100)] = 1,
         scorer: ScorerName = ScorerName.bm25,
+        mode: Mode = Mode.lexical,
     ) -> SearchResponse:
-        return search_response(index, q, min(k, settings.max_k), page, scorer)
+        return search_response(
+            index,
+            q,
+            min(k, settings.max_k),
+            page,
+            scorer,
+            mode,
+            settings.embeddings_path,
+        )
 
     @app.get("/docs/{doc_id}", response_model=DocResponse)
     def get_doc(
-        doc_id: int, index: Annotated[Index, Depends(get_index)]
+        doc_id: int, index: Annotated[AnyIndex, Depends(get_index)]
     ) -> DocResponse:
         meta = index.doc_meta.get(doc_id)
         if meta is None:
@@ -218,7 +266,7 @@ def create_app() -> FastAPI:
         )
 
     @app.get("/stats", response_model=StatsResponse)
-    def stats(index: Annotated[Index, Depends(get_index)]) -> StatsResponse:
+    def stats(index: Annotated[AnyIndex, Depends(get_index)]) -> StatsResponse:
         return StatsResponse(
             terms=len(index),
             documents=index.num_docs,
@@ -231,15 +279,18 @@ def create_app() -> FastAPI:
     def home(
         request: Request,
         settings: Annotated[Settings, Depends(get_settings)],
-        index: Annotated[Index | None, Depends(get_index_optional)],
+        index: Annotated[AnyIndex | None, Depends(get_index_optional)],
         q: Annotated[str, Query(max_length=200)] = "",
         page: Annotated[int, Query(ge=1, le=100)] = 1,
         scorer: ScorerName = ScorerName.bm25,
+        mode: Mode = Mode.lexical,
     ) -> HTMLResponse:
         context: dict[str, object] = {
             "q": q,
             "page": page,
             "scorer": scorer.value,
+            "mode": mode.value,
+            "semantic_on": settings.embeddings_path is not None,
             "results": [],
             "total": 0,
             "pages": 1,
@@ -252,7 +303,9 @@ def create_app() -> FastAPI:
             k = settings.default_k
             start = time.perf_counter()
             try:
-                results, total, terms = run_search(index, q, k, page, scorer)
+                results, total, terms = run_search(
+                    index, q, k, page, scorer, mode, settings.embeddings_path
+                )
                 context["results"] = [
                     {
                         "doc_id": r.doc_id,
@@ -273,7 +326,7 @@ def create_app() -> FastAPI:
     def doc_page(
         request: Request,
         doc_id: int,
-        index: Annotated[Index, Depends(get_index)],
+        index: Annotated[AnyIndex, Depends(get_index)],
         q: str = "",
     ) -> HTMLResponse:
         meta = index.doc_meta.get(doc_id)

@@ -10,6 +10,12 @@ class ScorerName(StrEnum):
     tfidf = "tfidf"
 
 
+class Mode(StrEnum):
+    lexical = "lexical"
+    semantic = "semantic"
+    hybrid = "hybrid"
+
+
 class Hit(BaseModel):
     doc_id: int
     score: float
@@ -20,6 +26,7 @@ class Hit(BaseModel):
 class SearchResponse(BaseModel):
     query: str
     scorer: ScorerName
+    mode: Mode = Mode.lexical
     page: int
     k: int
     total: int

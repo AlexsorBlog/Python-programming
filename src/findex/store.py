@@ -5,7 +5,7 @@ from array import array
 from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from findex.decorators import timed
 from findex.index import (
@@ -19,6 +19,9 @@ from findex.index import (
     PostingsEntry,
     ReprKind,
 )
+
+if TYPE_CHECKING:
+    from findex.numpy_index import NumpyIndex
 
 log = logging.getLogger(__name__)
 
@@ -44,6 +47,15 @@ def load(path: Path) -> Index:
     with path.open("rb") as f:
         # pickle.load returns Any by design; this file is one I wrote myself
         return cast(Index, pickle.load(f))
+
+
+def load_any(path: Path) -> "Index | NumpyIndex":
+    """A folder of .npy files is a lab 8 index, anything else is pickle/json."""
+    from findex.numpy_index import is_numpy_index, load_numpy
+
+    if is_numpy_index(path):
+        return load_numpy(path)
+    return load(path)
 
 
 @contextmanager

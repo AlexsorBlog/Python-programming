@@ -138,3 +138,32 @@ def test_html_doc_page(client: TestClient):
     r = client.get("/doc/1", params={"q": "lviv"})
     assert r.status_code == 200
     assert "Lviv" in r.text
+
+
+def test_semantic_mode_without_embeddings_is_422(client: TestClient):
+    r = client.get("/search", params={"q": "city", "mode": "semantic"})
+    assert r.status_code == 422
+    assert "EMBEDDINGS_PATH" in r.json()["detail"]
+
+
+def test_unknown_mode_is_422(client: TestClient):
+    assert (
+        client.get("/search", params={"q": "city", "mode": "magic"}).status_code == 422
+    )
+
+
+def test_service_runs_on_numpy_index(index: Index, tmp_path: Path):
+    from findex.numpy_index import from_index
+
+    application = create_app()
+    application.dependency_overrides[get_settings] = lambda: Settings(
+        index_path=tmp_path / "немає"
+    )
+    numpy_index = from_index(index)
+    application.dependency_overrides[get_index_optional] = lambda: numpy_index
+    with TestClient(application) as c:
+        body = c.get("/search", params={"q": "city ukraine"}).json()
+        assert body["hits"][0]["title"] == "Lviv"
+        assert c.get("/stats").json()["repr"] == "numpy"
+        assert c.get("/docs/0").json()["title"] == "Kyiv"
+        assert c.get("/docs/999").status_code == 404

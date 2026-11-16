@@ -1,13 +1,16 @@
 import logging
 from functools import lru_cache
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from findex.decorators import timed
-from findex.index import DocId, Index
+from findex.index import DocId, Index, SearchIndex
 from findex.merge import merge_and, merge_not, merge_or
 from findex.query import parse
 from findex.scoring import BM25, Scorer, SearchResult, score_documents, top_k
 from findex.snippet import document_text, make_snippet
+
+if TYPE_CHECKING:
+    from findex.numpy_index import NumpyIndex, ScorerKind
 
 log = logging.getLogger(__name__)
 
@@ -72,7 +75,7 @@ def boolean_search(index: Index, query: str, engine: Engine = "merge") -> list[D
 
 @lru_cache(maxsize=256)
 def _cached_matches(
-    index: Index, query: str
+    index: SearchIndex, query: str
 ) -> tuple[tuple[DocId, ...], tuple[str, ...]]:
     node = parse(query)
     if node is None:
@@ -82,7 +85,7 @@ def _cached_matches(
 
 @timed
 def matching_docs(
-    index: Index, query: str
+    index: SearchIndex, query: str
 ) -> tuple[tuple[DocId, ...], tuple[str, ...]]:
     result = _cached_matches(index, query)
     log.debug("кеш запитів: %s", _cached_matches.cache_info())
@@ -121,6 +124,46 @@ def ranked_search(
             )
         )
     return with_snippets
+
+
+@timed
+def ranked_search_numpy(
+    index: "NumpyIndex",
+    query: str,
+    scorer: "ScorerKind" = "bm25",
+    k: int = 10,
+    snippets: bool = False,
+    marker: tuple[str, str] = ("[", "]"),
+) -> list[SearchResult]:
+    """Lab 8: same query language, scores computed over arrays."""
+    import numpy as np
+
+    from findex.numpy_index import score_numpy, top_k_numpy
+
+    doc_ids, terms = matching_docs(index, query)
+    if not doc_ids:
+        return []
+    scores, touched = score_numpy(index, terms, scorer)
+    candidates = np.asarray(doc_ids, dtype=np.int32)
+    # lab 3 only ranks documents that got at least one term contribution
+    candidates = candidates[touched[candidates]]
+    results = [
+        SearchResult(score, doc_id, index.doc_meta[doc_id].title)
+        for doc_id, score in top_k_numpy(scores, candidates, k)
+    ]
+    if not snippets:
+        return results
+    return [
+        SearchResult(
+            r.score,
+            r.doc_id,
+            r.title,
+            make_snippet(
+                document_text(index.doc_meta[r.doc_id]), list(terms), marker=marker
+            ),
+        )
+        for r in results
+    ]
 
 
 # the old name from labs 2-3, kept so older commands and scripts still work

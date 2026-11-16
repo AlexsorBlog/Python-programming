@@ -17,11 +17,13 @@ from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn
 from rich.table import Table
 
 from findex.crawler import CrawlStats
+from findex.index import Index
+from findex.numpy_index import NumpyIndex, from_index, save_numpy
 from findex.parallel import build_parallel
-from findex.scoring import BM25, TfIdf
-from findex.search import ranked_search
+from findex.scoring import BM25, SearchResult, TfIdf
+from findex.search import ranked_search, ranked_search_numpy
 from findex.stats import eager_stats, human, lazy_stats
-from findex.store import open_index, save
+from findex.store import load_any, open_index, save
 
 
 # typer builds options from enums, not from Literal aliases,
@@ -30,11 +32,18 @@ class ReprChoice(enum.StrEnum):
     slots = "slots"
     plain = "plain"
     array = "array"
+    numpy = "numpy"
 
 
 class ScorerChoice(enum.StrEnum):
     bm25 = "bm25"
     tfidf = "tfidf"
+
+
+class ModeChoice(enum.StrEnum):
+    lexical = "lexical"
+    semantic = "semantic"
+    hybrid = "hybrid"
 
 
 class ExecutorChoice(enum.StrEnum):
@@ -117,24 +126,31 @@ def index(
         console=err,
     ) as progress:
         progress.add_task(f"індексую ({executor.value}, {jobs} воркер(ів))", total=None)
+        # numpy is built as array('I') pairs first, then copied into flat arrays
+        is_numpy = repr_kind is ReprChoice.numpy
         built, timings = build_parallel(
             corpus,
             jobs,
             executor.value,
             limit,
-            positions,
-            repr_kind.value,
+            positions and not is_numpy,
+            "array" if is_numpy else repr_kind.value,
         )
 
-    out.print(f"{built!r}")
+    final: Index | NumpyIndex = from_index(built) if is_numpy else built
+    out.print(f"{final!r}")
     out.print(
         f"час побудови: {timings.wall:.2f} с (merge {timings.merge:.2f} с), "
         f"CPU {timings.cpu:.2f} с, шматків: {timings.chunks}"
     )
 
     start = time.perf_counter()
-    save(built, out_path)
-    size = out_path.stat().st_size
+    if isinstance(final, NumpyIndex):
+        save_numpy(final, out_path)
+        size = sum(f.stat().st_size for f in out_path.iterdir())
+    else:
+        save(final, out_path)
+        size = out_path.stat().st_size
     out.print(
         f"збережено в {out_path} за {time.perf_counter() - start:.2f} с ({human(size)})"
     )
@@ -152,50 +168,92 @@ def search(
         bool, typer.Option("--json", help="вивести JSON-рядки в stdout")
     ] = False,
     snippets: Annotated[bool, typer.Option(help="показувати сніпети")] = True,
+    mode: Annotated[
+        ModeChoice, typer.Option(help="lexical (BM25), semantic або hybrid (RRF)")
+    ] = ModeChoice.lexical,
+    embeddings: Annotated[
+        Path | None,
+        typer.Option(help="тека з ембедингами (для semantic і hybrid)"),
+    ] = None,
 ) -> None:
     """Знайти документи у збереженому індексі."""
     if not index_path.exists():
         raise _fail(f"немає файлу індексу: {index_path}")
+    if mode is not ModeChoice.lexical and (
+        embeddings is None or not embeddings.exists()
+    ):
+        raise _fail("для semantic і hybrid потрібен --embeddings (findex embed)")
 
-    with open_index(index_path) as opened:
-        try:
-            results = ranked_search(
+    opened = load_any(index_path)
+    try:
+        if mode is ModeChoice.lexical:
+            results = _run_query(opened, query, scorer, k, snippets and not as_json)
+        else:
+            from findex.hybrid import semantic_results
+
+            assert embeddings is not None
+            results = semantic_results(
                 opened,
+                embeddings,
                 query,
-                BM25() if scorer is ScorerChoice.bm25 else TfIdf(),
+                mode.value,
                 k,
                 snippets=snippets and not as_json,
                 marker=(_OPEN, _CLOSE),
             )
-        except ValueError as e:
-            raise _fail(str(e)) from None
+    except ValueError as e:
+        raise _fail(str(e)) from None
+    finally:
+        opened.close()
 
-        if as_json:
-            for result in results:
-                line = {
-                    "doc_id": result.doc_id,
-                    "score": round(result.score, 4),
-                    "title": result.title,
-                }
-                # plain print, not rich: stdout must stay machine-readable
-                print(json.dumps(line, ensure_ascii=False))
-            return
-
-        if not results:
-            out.print("нічого не знайдено")
-            return
-
-        table = Table(title=f"{query}  (scorer={scorer.value})", title_justify="left")
-        table.add_column("бал", justify="right", style="cyan")
-        table.add_column("заголовок", style="bold")
-        if snippets:
-            table.add_column("сніпет", overflow="fold")
+    if as_json:
         for result in results:
-            row = [f"{result.score:.3f}", result.title]
-            if snippets:
-                row.append(_highlight(result.snippet))
-            table.add_row(*row)
-        out.print(table)
+            line = {
+                "doc_id": result.doc_id,
+                "score": round(result.score, 4),
+                "title": result.title,
+            }
+            # plain print, not rich: stdout must stay machine-readable
+            print(json.dumps(line, ensure_ascii=False))
+        return
+
+    if not results:
+        out.print("нічого не знайдено")
+        return
+
+    table = Table(title=f"{query}  (scorer={scorer.value})", title_justify="left")
+    table.add_column("бал", justify="right", style="cyan")
+    table.add_column("заголовок", style="bold")
+    if snippets:
+        table.add_column("сніпет", overflow="fold")
+    for result in results:
+        row = [f"{result.score:.3f}", result.title]
+        if snippets:
+            row.append(_highlight(result.snippet))
+        table.add_row(*row)
+    out.print(table)
+
+
+def _run_query(
+    opened: Index | NumpyIndex,
+    query: str,
+    scorer: ScorerChoice,
+    k: int,
+    snippets: bool,
+) -> list[SearchResult]:
+    """The lab 3 object index and the lab 8 NumPy index score differently."""
+    if isinstance(opened, NumpyIndex):
+        return ranked_search_numpy(
+            opened, query, scorer.value, k, snippets=snippets, marker=(_OPEN, _CLOSE)
+        )
+    return ranked_search(
+        opened,
+        query,
+        BM25() if scorer is ScorerChoice.bm25 else TfIdf(),
+        k,
+        snippets=snippets,
+        marker=(_OPEN, _CLOSE),
+    )
 
 
 def _highlight(snippet: str) -> str:
@@ -395,4 +453,25 @@ def serve(
         port=port,
         workers=workers,
         log_level="info",
+    )
+
+
+@app.command()
+def embed(
+    corpus: Annotated[Path, typer.Argument(help="той самий корпус, що й для індексу")],
+    out_dir: Annotated[Path, typer.Option("--out", help="тека для .npy")],
+    limit: Annotated[int | None, typer.Option(help="тільки перші N документів")] = None,
+) -> None:
+    """Порахувати ембединги фрагментів документів (all-MiniLM-L6-v2)."""
+    from findex.semantic import build_embeddings
+
+    if not corpus.exists():
+        raise _fail(f"немає такого корпусу: {corpus}")
+    start = time.perf_counter()
+    with Progress(SpinnerColumn(), TextColumn("{task.description}"), console=err) as p:
+        p.add_task("рахую ембединги (перший запуск качає модель ~90 МБ)", total=None)
+        docs, pieces = build_embeddings(corpus, out_dir, limit)
+    out.print(
+        f"документів: {docs:,}, фрагментів: {pieces:,}, "
+        f"за {time.perf_counter() - start:.1f} с -> {out_dir}"
     )

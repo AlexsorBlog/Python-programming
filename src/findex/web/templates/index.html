@@ -9,6 +9,13 @@
   <form class="search" action="/" method="get" role="search">
     <input type="search" name="q" value="{{ q }}" placeholder="kyiv AND (ukraine OR dnipro) NOT river"
            autocomplete="off" autofocus aria-label="Запит">
+    {% if semantic_on %}
+    <select name="mode" aria-label="Режим пошуку">
+      <option value="lexical" {% if mode == "lexical" %}selected{% endif %}>за словами</option>
+      <option value="semantic" {% if mode == "semantic" %}selected{% endif %}>за змістом</option>
+      <option value="hybrid" {% if mode == "hybrid" %}selected{% endif %}>гібрид</option>
+    </select>
+    {% endif %}
     <select name="scorer" aria-label="Формула рейтингу">
       <option value="bm25" {% if scorer == "bm25" %}selected{% endif %}>BM25</option>
       <option value="tfidf" {% if scorer == "tfidf" %}selected{% endif %}>TF-IDF</option>
@@ -48,11 +55,11 @@
 {% if pages > 1 %}
 <nav class="pager" aria-label="Сторінки результатів">
   {% if page > 1 %}
-  <a href="/?q={{ q | urlencode }}&scorer={{ scorer }}&page={{ page - 1 }}">← Назад</a>
+  <a href="/?q={{ q | urlencode }}&scorer={{ scorer }}&mode={{ mode }}&page={{ page - 1 }}">← Назад</a>
   {% else %}<span></span>{% endif %}
   <span class="where">{{ page }} / {{ pages }}</span>
   {% if page < pages %}
-  <a href="/?q={{ q | urlencode }}&scorer={{ scorer }}&page={{ page + 1 }}">Далі →</a>
+  <a href="/?q={{ q | urlencode }}&scorer={{ scorer }}&mode={{ mode }}&page={{ page + 1 }}">Далі →</a>
   {% else %}<span></span>{% endif %}
 </nav>
 {% endif %}

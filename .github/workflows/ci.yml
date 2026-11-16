@@ -30,6 +30,15 @@ jobs:
       - name: pytest із покриттям
         run: uv run pytest --cov=findex --cov-report=term
 
+      - name: Бенчмарки (pytest-benchmark)
+        run: uv run pytest tests/test_benchmarks.py --benchmark-only --benchmark-json=benchmark.json
+
+      - name: Зберегти результати бенчмарків
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark
+          path: benchmark.json
+
       - name: Зібрати wheel
         run: uv build
 

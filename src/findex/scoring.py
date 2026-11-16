@@ -2,7 +2,6 @@ import heapq
 import math
 from collections import defaultdict
 from dataclasses import dataclass
-from operator import attrgetter
 from typing import Protocol
 
 from findex.index import DocId, Index, PostingLike
@@ -71,4 +70,6 @@ def top_k(scores: dict[DocId, float], index: Index, k: int = 10) -> list[SearchR
         SearchResult(score, doc_id, index.doc_meta[doc_id].title)
         for doc_id, score in scores.items()
     ]
-    return heapq.nlargest(k, results, key=attrgetter("score"))
+    # equal scores: the smaller doc_id wins, so the order is fully defined
+    # (the NumPy scorer in lab 8 uses the same rule and must match exactly)
+    return heapq.nlargest(k, results, key=lambda r: (r.score, -r.doc_id))

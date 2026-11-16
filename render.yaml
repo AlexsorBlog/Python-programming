@@ -11,7 +11,9 @@ services:
     autoDeploy: true
     envVars:
       - key: INDEX_PATH
-        value: /app/index.pkl
+        value: /app/index_np
+      - key: EMBEDDINGS_PATH
+        value: /app/embeddings
       - key: WEB_CONCURRENCY
         value: "1"
       - key: MAX_K

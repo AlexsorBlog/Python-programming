@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 
-from findex.index import DocId, Index
+from findex.index import DocId, SearchIndex
 from findex.merge import merge_and, merge_not, merge_or
 from findex.tokenize import tokenize
 
@@ -18,7 +18,7 @@ class Node:
     def terms(self) -> list[str]:
         raise NotImplementedError
 
-    def evaluate(self, index: Index) -> list[DocId]:
+    def evaluate(self, index: SearchIndex) -> list[DocId]:
         raise NotImplementedError
 
 
@@ -29,7 +29,7 @@ class Term(Node):
     def terms(self) -> list[str]:
         return [self.term]
 
-    def evaluate(self, index: Index) -> list[DocId]:
+    def evaluate(self, index: SearchIndex) -> list[DocId]:
         return index.doc_ids(self.term)
 
 
@@ -40,7 +40,7 @@ class Phrase(Node):
     def terms(self) -> list[str]:
         return list(self.words)
 
-    def evaluate(self, index: Index) -> list[DocId]:
+    def evaluate(self, index: SearchIndex) -> list[DocId]:
         if not self.words:
             return []
         if not index.has_positions:
@@ -70,7 +70,7 @@ class And(Node):
     def terms(self) -> list[str]:
         return self.left.terms() + self.right.terms()
 
-    def evaluate(self, index: Index) -> list[DocId]:
+    def evaluate(self, index: SearchIndex) -> list[DocId]:
         return merge_and(self.left.evaluate(index), self.right.evaluate(index))
 
 
@@ -82,7 +82,7 @@ class Or(Node):
     def terms(self) -> list[str]:
         return self.left.terms() + self.right.terms()
 
-    def evaluate(self, index: Index) -> list[DocId]:
+    def evaluate(self, index: SearchIndex) -> list[DocId]:
         return merge_or(self.left.evaluate(index), self.right.evaluate(index))
 
 
@@ -93,7 +93,7 @@ class Not(Node):
     def terms(self) -> list[str]:
         return []
 
-    def evaluate(self, index: Index) -> list[DocId]:
+    def evaluate(self, index: SearchIndex) -> list[DocId]:
         return merge_not(sorted(index.doc_meta), self.child.evaluate(index))
 
 
