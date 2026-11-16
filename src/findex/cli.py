@@ -366,3 +366,33 @@ async def _crawl_to_file(
                 + "\n"
             )
             live.update(render())
+
+
+@app.command()
+def serve(
+    index_path: Annotated[
+        Path | None,
+        typer.Option("--index", help="файл індексу (інакше INDEX_PATH)"),
+    ] = None,
+    host: Annotated[str, typer.Option(help="адреса")] = "127.0.0.1",
+    port: Annotated[int, typer.Option(help="порт")] = 8000,
+    workers: Annotated[int, typer.Option(help="скільки процесів uvicorn")] = 1,
+) -> None:
+    """Запустити веб-сервіс (FastAPI + uvicorn)."""
+    import uvicorn
+
+    if index_path is not None:
+        # settings come only from the environment, so the flag just sets it
+        os.environ["INDEX_PATH"] = str(index_path)
+    path = Path(os.environ.get("INDEX_PATH", "data/demo.pkl"))
+    if not path.exists():
+        raise _fail(f"немає файлу індексу: {path}")
+
+    err.print(f"findex на http://{host}:{port}  (індекс {path}, воркерів {workers})")
+    uvicorn.run(
+        "findex.web.app:app",
+        host=host,
+        port=port,
+        workers=workers,
+        log_level="info",
+    )

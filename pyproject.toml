@@ -1,6 +1,6 @@
 [project]
 name = "findex"
-version = "0.4.0"
+version = "0.7.0"
 description = "Пошукова система по власному корпусу текстів"
 readme = "README.md"
 requires-python = ">=3.13"
@@ -14,10 +14,14 @@ classifiers = [
     "Topic :: Text Processing :: Indexing",
 ]
 dependencies = [
+    "fastapi>=0.163.1",
     "httpx>=0.28.1",
+    "jinja2>=3.1.6",
+    "pydantic-settings>=2.16.3",
     "rich>=15.0.0",
     "selectolax>=1.0.0",
     "typer>=0.27.2",
+    "uvicorn[standard]>=0.54.0",
 ]
 
 [project.scripts]

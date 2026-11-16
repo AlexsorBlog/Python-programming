@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+{% block title %}{% if q %}{{ q }} — {% endif %}findex{% endblock %}
+{% block content %}
+<section class="hero {% if q %}compact{% endif %}">
+  {% if not q %}
+  <h1>Пошук по Вікіпедії</h1>
+  <p class="lead">{{ "{:,}".format(docs).replace(",", " ") }} статей, власний інвертований індекс і BM25.</p>
+  {% endif %}
+  <form class="search" action="/" method="get" role="search">
+    <input type="search" name="q" value="{{ q }}" placeholder="kyiv AND (ukraine OR dnipro) NOT river"
+           autocomplete="off" autofocus aria-label="Запит">
+    <select name="scorer" aria-label="Формула рейтингу">
+      <option value="bm25" {% if scorer == "bm25" %}selected{% endif %}>BM25</option>
+      <option value="tfidf" {% if scorer == "tfidf" %}selected{% endif %}>TF-IDF</option>
+    </select>
+    <button type="submit">Шукати</button>
+  </form>
+  {% if not q %}
+  <p class="hint">
+    Можна: <code>AND</code>, <code>OR</code>, <code>NOT</code>, дужки і фрази в лапках —
+    <a href="/?q=%22nuclear+power+plant%22">"nuclear power plant"</a>,
+    <a href="/?q=chernobyl+disaster">chernobyl disaster</a>,
+    <a href="/?q=python+OR+java">python OR java</a>.
+  </p>
+  {% endif %}
+</section>
+
+{% if not ready %}
+<p class="notice">Індекс ще завантажується, спробуйте за кілька секунд.</p>
+{% elif error %}
+<p class="notice error">Не вдалось розібрати запит: {{ error }}</p>
+{% elif q %}
+<p class="meta">
+  {% if total %}Знайдено {{ total }} · сторінка {{ page }} з {{ pages }} · {{ took_ms }} мс
+  {% else %}Нічого не знайдено за {{ took_ms }} мс{% endif %}
+</p>
+
+<ol class="results" start="{{ (page - 1) * 10 + 1 }}">
+  {% for r in results %}
+  <li>
+    <a class="title" href="/doc/{{ r.doc_id }}?q={{ q | urlencode }}">{{ r.title }}</a>
+    <span class="score" title="бал {{ scorer | upper }}">{{ r.score }}</span>
+    <p class="snippet">{{ r.snippet }}</p>
+  </li>
+  {% endfor %}
+</ol>
+
+{% if pages > 1 %}
+<nav class="pager" aria-label="Сторінки результатів">
+  {% if page > 1 %}
+  <a href="/?q={{ q | urlencode }}&scorer={{ scorer }}&page={{ page - 1 }}">← Назад</a>
+  {% else %}<span></span>{% endif %}
+  <span class="where">{{ page }} / {{ pages }}</span>
+  {% if page < pages %}
+  <a href="/?q={{ q | urlencode }}&scorer={{ scorer }}&page={{ page + 1 }}">Далі →</a>
+  {% else %}<span></span>{% endif %}
+</nav>
+{% endif %}
+{% endif %}
+{% endblock %}

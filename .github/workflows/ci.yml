@@ -35,3 +35,26 @@ jobs:
 
       - name: Перевірити, що CLI працює з wheel
         run: uvx --from dist/*.whl findex --help
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Зібрати образ
+        run: docker build -t findex .
+
+      - name: Запустити контейнер і дочекатися /health
+        run: |
+          docker run -d --name findex -p 8000:8000 findex
+          for i in $(seq 1 60); do
+            if curl -fs http://127.0.0.1:8000/health; then exit 0; fi
+            sleep 2
+          done
+          docker logs findex
+          exit 1
+
+      - name: Перевірити пошук і що процес не root
+        run: |
+          curl -fs "http://127.0.0.1:8000/search?q=spain&k=3"
+          test "$(docker exec findex id -u)" != "0"

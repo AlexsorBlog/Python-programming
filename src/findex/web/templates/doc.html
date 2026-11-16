@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block title %}{{ title }} — findex{% endblock %}
+{% block content %}
+<article class="doc">
+  {% if q %}<a class="back" href="/?q={{ q | urlencode }}">← до результатів «{{ q }}»</a>{% endif %}
+  <h1>{{ title }}</h1>
+  <p class="meta">документ #{{ doc_id }} · {{ length }} токенів</p>
+  {% for p in paragraphs %}
+  <p>{{ p }}</p>
+  {% endfor %}
+</article>
+{% endblock %}

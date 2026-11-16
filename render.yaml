@@ -1,0 +1,18 @@
+# Render Blueprint: New -> Blueprint -> pick this repo.
+# All config is environment variables; /health is the platform health check.
+services:
+  - type: web
+    name: findex
+    runtime: docker
+    plan: free
+    region: frankfurt
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: INDEX_PATH
+        value: /app/index.pkl
+      - key: WEB_CONCURRENCY
+        value: "1"
+      - key: MAX_K
+        value: "50"

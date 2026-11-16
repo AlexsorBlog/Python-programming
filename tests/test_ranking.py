@@ -139,3 +139,9 @@ def test_build_on_a_bigger_corpus(tmp_path: Path):
     assert built.doc_ids("word5") == sorted(built.doc_ids("word5"))
     results = ranked_search(built, "word5 term10", BM25(), k=5)
     assert results
+
+
+def test_snippet_highlights_whole_words_only():
+    snippet = make_snippet("List of disasters and one disaster", ["disaster"])
+    assert "[disaster]s" not in snippet
+    assert "[disaster]" in snippet
